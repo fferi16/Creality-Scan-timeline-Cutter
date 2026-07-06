@@ -20,13 +20,18 @@ const translations = {
     project: 'Project',
     modelSurface: 'Model surface',
     modelSurfaceDesc: 'Show the fused surface under the points',
-    cutButton: '✂️ Cut the selected section',
+    intervalStart: 'Start',
+    intervalEnd: 'End',
+    cutButton: '✂️ Cut this section',
     inProgress: 'In progress…',
     anotherProject: '← Another project',
 
-    cutDoneTitle: '✅ Cut done',
-    cutDoneDesc:
-      '{frames} frames removed ({from}–{to}% of the scan). Open the {name} project in Creality Scan and run the fusion — it will rebuild without the moved section.',
+    cutsHeader: '✅ Cuts made',
+    startOver: '↺ Start over',
+    cutRow: '{from}–{to}% · {frames} frames',
+    keepInfo: '{remaining} / {total} frames kept',
+    crealityHint:
+      'Open the {name} project in Creality Scan and run the fusion — it rebuilds without the removed sections.',
 
     placeholderTitle: 'Choose a scanned project',
     placeholderDesc:
@@ -61,13 +66,18 @@ const translations = {
     project: 'Projekt',
     modelSurface: 'Modell felület',
     modelSurfaceDesc: 'A fúzionált felület mutatása a pontok alatt',
-    cutButton: '✂️ Beállított szakasz kivágása',
+    intervalStart: 'Kezdet',
+    intervalEnd: 'Vég',
+    cutButton: '✂️ Szakasz kivágása',
     inProgress: 'Folyamatban…',
     anotherProject: '← Másik projekt',
 
-    cutDoneTitle: '✅ Kivágva',
-    cutDoneDesc:
-      '{frames} képkocka törölve (a szken {from}–{to}%-a). Nyisd meg a {name} projektet a Creality Scanben, és futtasd le a fúziót — a bemozdult szakasz nélkül fog összeállni.',
+    cutsHeader: '✅ Vágások',
+    startOver: '↺ Újrakezdés',
+    cutRow: '{from}–{to}% · {frames} képkocka',
+    keepInfo: '{remaining} / {total} képkocka maradt',
+    crealityHint:
+      'Nyisd meg a {name} projektet a Creality Scanben, és futtasd le a fúziót — a kivágott szakaszok nélkül áll össze.',
 
     placeholderTitle: 'Válassz egy szkennelt projektet',
     placeholderDesc:

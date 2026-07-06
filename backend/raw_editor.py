@@ -8,6 +8,7 @@ import os
 import glob as _glob
 import json
 import uuid
+import shutil
 import datetime
 import subprocess
 
@@ -81,9 +82,10 @@ class LoadRequest(BaseModel):
 
 
 class CutRequest(BaseModel):
-    obp: str          # the ORIGINAL project's project.obp (copied on cut)
-    start_pct: float  # 0..100 — interval start as % of scan time
-    end_pct: float    # 0..100 — interval end
+    obp: str            # the ORIGINAL project's project.obp (copied on cut)
+    start_pct: float    # 0..100 — interval start as % of scan time
+    end_pct: float      # 0..100 — interval end
+    reset: bool = False  # start over: rebuild the copy fresh before this cut
 
 
 @router.get("/available")
@@ -257,12 +259,27 @@ def load(req: LoadRequest):
     }
 
 
+def _frame_numbers(obscan_path):
+    """Sorted depth-frame numbers of a resources.obscan (only reads names, so
+    fast even on multi-GB files)."""
+    import re as _re
+    import sqlite3
+    con = sqlite3.connect(f"file:{obscan_path.replace(chr(92), '/')}?mode=ro", uri=True)
+    try:
+        rows = con.execute("SELECT name FROM files WHERE name LIKE 'd~%'").fetchall()
+    finally:
+        con.close()
+    return sorted(int(m.group(1)) for (nm,) in rows
+                  for m in [_re.match(r"d~0*(\d+)", nm)] if m)
+
+
 @router.post("/cut")
 def cut(req: CutRequest):
     """Delete a time interval of the scan by removing its RAW FRAMES from a copy
-    of the project, so Creality Scan re-fuses without them. Creality fuses from
-    the frames (not the derived clouds), so this is what actually makes the cut
-    stick. The copy is registered so it shows up in Creality's project list."""
+    of the project, so Creality Scan re-fuses without them. Multiple cuts on one
+    project accumulate on the same copy; `reset` rebuilds it fresh. The interval
+    is mapped against the ORIGINAL frame list, so every cut's % means the same
+    scan time no matter how many frames were already removed."""
     import re as _re
     import sqlite3
     if not os.path.isfile(req.obp):
@@ -271,6 +288,17 @@ def cut(req: CutRequest):
     name = os.path.basename(src_dir)
     work_dir = _work_dir_for(name)
     work_id = name + CUT_SUFFIX
+
+    # map % against the ORIGINAL scan's frames (stable across repeated cuts)
+    src_obscan = _glob.glob(os.path.join(src_dir, "*", "resources.obscan"))
+    if not src_obscan:
+        raise HTTPException(400, "Nincsenek nyers képkockák ebben a projektben.")
+    orig_nums = _frame_numbers(src_obscan[0])
+    if not orig_nums:
+        raise HTTPException(400, "Nincsenek nyers képkockák ebben a projektben.")
+    n = len(orig_nums)
+    lo = orig_nums[min(n - 1, int(req.start_pct / 100.0 * n))]
+    hi = orig_nums[min(n - 1, int(req.end_pct / 100.0 * n))]
 
     if not os.path.isdir(work_dir):
         subprocess.run(
@@ -281,29 +309,24 @@ def cut(req: CutRequest):
     obscan_hits = _glob.glob(os.path.join(work_dir, "*", "resources.obscan"))
     if not obscan_hits:
         raise HTTPException(500, "Nem találom a resources.obscan-t a másolatban.")
-    obscan = obscan_hits[0]
+    if req.reset:
+        # "start over": restore the only file we edit (the frames DB) from the
+        # original, bringing every previously-cut frame back before this cut.
+        shutil.copy2(src_obscan[0], obscan_hits[0])
 
-    con = sqlite3.connect(obscan)
+    con = sqlite3.connect(obscan_hits[0])
     try:
-        rows = con.execute("SELECT name FROM files WHERE name LIKE 'd~%'").fetchall()
-        nums = sorted(int(m.group(1)) for (nm,) in rows
-                      for m in [_re.match(r"d~0*(\d+)", nm)] if m)
-        if not nums:
-            raise HTTPException(400, "Nincsenek nyers képkockák ebben a projektben.")
-        # map the time interval to a frame-number window (frames are time-ordered)
-        lo = nums[min(len(nums) - 1, int(req.start_pct / 100.0 * len(nums)))]
-        hi = nums[min(len(nums) - 1, int(req.end_pct / 100.0 * len(nums)))]
-        before = len(nums)
-        # delete the depth + colour frames in that window
         cur = con.cursor()
-        deleted = 0
+        deleted = 0  # depth frames only, so it's on the same basis as total/remaining
         for (nm,) in con.execute("SELECT name FROM files WHERE name LIKE 'd~%' OR name LIKE 'c~%'").fetchall():
             m = _re.match(r"[dc]~0*(\d+)", nm)
             if m and lo <= int(m.group(1)) <= hi:
                 cur.execute("DELETE FROM files WHERE name=?", (nm,))
-                deleted += 1
+                if nm.startswith("d~"):
+                    deleted += 1
         con.commit()
         con.execute("VACUUM")
+        remaining = con.execute("SELECT COUNT(*) FROM files WHERE name LIKE 'd~%'").fetchone()[0]
     finally:
         con.close()
 
@@ -311,8 +334,8 @@ def cut(req: CutRequest):
     return {
         "work_id": work_id,
         "work_dir": work_dir,
-        "before": before,
-        "after": before - (hi - lo + 1),
         "deleted_frames": deleted,
+        "remaining_frames": remaining,
+        "total_frames": n,
         "frame_window": [lo, hi],
     }

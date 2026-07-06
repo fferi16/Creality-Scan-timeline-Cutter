@@ -29,7 +29,8 @@ export default function RawEditor() {
   // print layers). "Cut" removes exactly this window's frames.
   const [visLo, setVisLo] = useState(0);
   const [visHi, setVisHi] = useState(100);
-  const [lastCut, setLastCut] = useState(null);
+  const [cuts, setCuts] = useState([]); // [{ lo, hi, frames }] — sections removed so far
+  const firstCutRef = useRef(true);     // first cut after load rebuilds the copy fresh
 
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
@@ -170,6 +171,24 @@ export default function RawEditor() {
     pts.geometry.setDrawRange(a, Math.max(0, b - a));
   }, [visLo, visHi, numPoints]);
 
+  // ---- grey out the already-cut time sections ----
+  useEffect(() => {
+    const pts = pointsRef.current;
+    const base = baseColorsRef.current;
+    if (!pts || !base) return;
+    const col = pts.geometry.getAttribute('color');
+    col.array.set(base); // reset to the time gradient
+    const n = base.length / 3;
+    for (const c of cuts) {
+      const a = Math.floor(c.lo / 100 * n);
+      const b = Math.ceil(c.hi / 100 * n);
+      for (let i = a; i < b; i++) {
+        col.array[i * 3] = 0.26; col.array[i * 3 + 1] = 0.26; col.array[i * 3 + 2] = 0.30;
+      }
+    }
+    col.needsUpdate = true;
+  }, [cuts, numPoints]);
+
   // ---- toggle the fused surface on/off ----
   useEffect(() => {
     showMeshRef.current = showMesh;
@@ -178,7 +197,8 @@ export default function RawEditor() {
 
   const loadProject = async (obp) => {
     setBusy(t('busyLoad'));
-    setLastCut(null);
+    setCuts([]);
+    firstCutRef.current = true;
     try {
       const r = await fetch(`${BACKEND_URL}/api/raw/load`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -201,14 +221,25 @@ export default function RawEditor() {
       return;
     }
     setBusy(t('busyCut'));
+    const lo = visLo, hi = visHi;
     try {
       const r = await fetch(`${BACKEND_URL}/api/raw/cut`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ obp: work.obp, start_pct: visLo, end_pct: visHi }),
+        body: JSON.stringify({ obp: work.obp, start_pct: lo, end_pct: hi, reset: firstCutRef.current }),
       });
       if (!r.ok) throw new Error(errText((await r.json().catch(() => ({}))).detail));
-      setLastCut(await r.json());
+      const data = await r.json();
+      firstCutRef.current = false;
+      // remember this section (for the grey overlay + the list); keep editing
+      setCuts((prev) => [...prev, { lo, hi, frames: data.deleted_frames, ...data }]);
+      setVisLo(0); setVisHi(100); // reset the window so the whole scan is visible again
     } catch (e) { alert(e.message || String(e)); } finally { setBusy(null); }
+  };
+
+  const startOver = () => {
+    setCuts([]);
+    firstCutRef.current = true; // next cut rebuilds the copy from the original
+    setVisLo(0); setVisHi(100);
   };
 
   return (
@@ -259,21 +290,32 @@ export default function RawEditor() {
             <button className="btn-primary" onClick={doCut} disabled={!!busy} style={{ marginTop: '1rem' }}>
               {busy ? t('inProgress') : t('cutButton')}
             </button>
-            <button className="btn-secondary" onClick={() => { setWork(null); setLastCut(null); setVisLo(0); setVisHi(100); }} disabled={!!busy} style={{ marginTop: '0.5rem' }}>
+            <button className="btn-secondary" onClick={() => { setWork(null); setCuts([]); setVisLo(0); setVisHi(100); }} disabled={!!busy} style={{ marginTop: '0.5rem' }}>
               {t('anotherProject')}
             </button>
 
-            {lastCut && (
+            {cuts.length > 0 && (
               <div className="sidebar-section" style={{ background: 'rgba(16,185,129,0.05)', marginTop: '1rem' }}>
-                <h3>{t('cutDoneTitle')}</h3>
-                <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                  {t('cutDoneDesc', {
-                    frames: (lastCut.deleted_frames || 0).toLocaleString(),
-                    from: visLo.toFixed(0),
-                    to: visHi.toFixed(0),
-                    name: lastCut.work_id,
+                <h3>{t('cutsHeader')}</h3>
+                <div className="cut-list">
+                  {cuts.map((c, i) => (
+                    <div key={i} className="cut-row">
+                      {t('cutRow', { from: c.lo.toFixed(2), to: c.hi.toFixed(2), frames: c.frames })}
+                    </div>
+                  ))}
+                </div>
+                <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', margin: '0.5rem 0' }}>
+                  {t('keepInfo', {
+                    remaining: (cuts[cuts.length - 1].remaining_frames ?? 0).toLocaleString(),
+                    total: (cuts[cuts.length - 1].total_frames ?? 0).toLocaleString(),
                   })}
                 </p>
+                <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                  {t('crealityHint', { name: cuts[cuts.length - 1].work_id })}
+                </p>
+                <button className="btn-secondary" onClick={startOver} disabled={!!busy} style={{ marginTop: '0.5rem' }}>
+                  {t('startOver')}
+                </button>
               </div>
             )}
           </div>
@@ -302,13 +344,22 @@ export default function RawEditor() {
             <div className="timeline-bar">
               <div className="timeline-head">
                 <span>⏱️ {t('timelineHead')}</span>
-                <span className="timeline-window">{visLo.toFixed(0)}% – {visHi.toFixed(0)}%</span>
+                <div className="timeline-inputs">
+                  <label>{t('intervalStart')}
+                    <input type="number" min="0" max="100" step="0.01" value={visLo.toFixed(2)}
+                      onChange={(e) => setVisLo(Math.max(0, Math.min(+e.target.value, visHi - 0.01)))} />%
+                  </label>
+                  <label>{t('intervalEnd')}
+                    <input type="number" min="0" max="100" step="0.01" value={visHi.toFixed(2)}
+                      onChange={(e) => setVisHi(Math.min(100, Math.max(+e.target.value, visLo + 0.01)))} />%
+                  </label>
+                </div>
               </div>
               <div className="timeline-track">
-                <input type="range" min="0" max="100" step="0.5" value={visLo}
-                  onChange={(e) => setVisLo(Math.min(+e.target.value, visHi - 0.5))} />
-                <input type="range" min="0" max="100" step="0.5" value={visHi}
-                  onChange={(e) => setVisHi(Math.max(+e.target.value, visLo + 0.5))} />
+                <input type="range" min="0" max="100" step="0.01" value={visLo}
+                  onChange={(e) => setVisLo(Math.min(+e.target.value, visHi - 0.01))} />
+                <input type="range" min="0" max="100" step="0.01" value={visHi}
+                  onChange={(e) => setVisHi(Math.max(+e.target.value, visLo + 0.01))} />
               </div>
               <div className="timeline-labels">
                 <span>{t('scanStart')}</span>
