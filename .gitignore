@@ -1,0 +1,25 @@
+# --- Python ---
+.venv/
+__pycache__/
+*.pyc
+
+# --- Node / frontend build ---
+frontend/node_modules/
+frontend/dist/
+
+# --- build artifact (28 MB; distribute via GitHub Releases instead) ---
+3D Scan Doctor.exe
+
+# --- runtime data / logs (scans, temp, logs) ---
+backend/processed_downloads/
+backend/temp_uploads/
+backend/sdk_logs/
+backend/server.log
+GPPLog.txt
+backend/GPPLog.txt
+
+# --- editor / local config ---
+.claude/settings.local.json
+.vscode/
+.idea/
+*.log
