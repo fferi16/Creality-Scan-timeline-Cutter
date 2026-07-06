@@ -1,5 +1,5 @@
 """
-3D Scan Doctor launcher.
+Creality Scan Timeline Cutter launcher.
 
 Starts the FastAPI backend invisibly (no console window), opens the app in the
 default browser, and sits in the Windows system tray with a "Kilepes" option.
@@ -24,7 +24,7 @@ def base_dir():
 
 
 def error_box(message):
-    ctypes.windll.user32.MessageBoxW(None, message, "3D Scan Doctor", 0x10)
+    ctypes.windll.user32.MessageBoxW(None, message, "Creality Scan Timeline Cutter", 0x10)
 
 
 def server_running():
@@ -61,7 +61,7 @@ def main():
     if not os.path.exists(python) or not os.path.isdir(backend):
         error_box(
             "Nem talalom a program fajljait!\n\n"
-            "A '3D Scan Doctor.exe' a projekt mappajaban kell legyen\n"
+            "A 'Creality Scan Timeline Cutter.exe' a projekt mappajaban kell legyen\n"
             "(a .venv es a backend mappak mellett).\n\n"
             "Ha parancsikont szeretnel az asztalra, ne az exe-t masold at,\n"
             "hanem jobb klikk > Kuldes > Asztal (parancsikon letrehozasa)."
@@ -109,9 +109,9 @@ def main():
         icon.stop()
 
     icon = pystray.Icon(
-        "3d_scan_doctor",
+        "creality_scan_timeline_cutter",
         make_tray_icon_image(),
-        "3D Scan Doctor - fut",
+        "Creality Scan Timeline Cutter",
         menu=pystray.Menu(
             pystray.MenuItem("Megnyitas a bongeszoben", on_open, default=True),
             pystray.MenuItem("Kilepes", on_quit),

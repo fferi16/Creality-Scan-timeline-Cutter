@@ -1,0 +1,5 @@
+fastapi==0.139.0
+uvicorn==0.50.0
+pymeshlab==2025.7.post1
+trimesh==4.12.2
+numpy==2.5.0

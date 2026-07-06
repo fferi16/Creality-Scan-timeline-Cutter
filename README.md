@@ -1,58 +1,113 @@
-# 3D Scan Doctor
+# Creality Scan Timeline Cutter
 
-Eszköz **Creality Otter** (és hasonló) 3D szkennerrel készült **emberi szkenek** javítására.
-A fő probléma, amit megold: ha az alany szkennelés közben bemozdul, a felület
-**kettőződik ("dupla héj")**. Két külön megközelítést kínál rá.
+*[English](#english) · [Magyar](#magyar)*
 
-## Funkciók
+---
 
-### 🩹 Mesh Javító
-Kész, exportált modellekre (OBJ / PLY / STL). A **dupla héj javítás** Screened
-Poisson rekonstrukcióval egyetlen tiszta felületté olvasztja a kettőződött részt,
-plusz zajszűrés, lyukkitöltés, simítás és decimálás. Osztott (előtte/utána) 3D nézet.
+## English
 
-### 🎞️ Nyers Szken Vágó
-Közvetlenül a Creality Scan **nyers projektjeivel** dolgozik. A pontok a szken
-**valódi keletkezési (idő) sorrendjében** jelennek meg — egy alsó, réteg-nézegető
-stílusú csúszkával végignézed az időt, kijelölöd a bemozdult szakaszt, és kivágod.
-A kivágás a nyers képkockákat törli, így a **Creality Scanben** újrafuzionálva a
-hibás szakasz nélkül áll össze a modell.
+A tool for **Creality Otter** (and similar) 3D scans of **people**. When the
+subject moves during scanning, the surface **doubles up** ("double shell"). This
+tool lets you scrub through the scan in **real acquisition order**, isolate the
+moment the subject moved, and **cut that section** — then you re-fuse the cleaned
+project in Creality Scan.
 
-## Felépítés
+### How it works
+- The raw scan points are read straight from the project's plain-text
+  `pc_after.ply`, which the scanner writes in **capture (time) order** — so a
+  point's position in the file is its position in scan time. **No proprietary
+  Creality SDK or DLL is used or needed.**
+- A bottom slider (Bambu-Lab layer-preview style) controls which slice of scan
+  time is visible; you narrow it to the moved section and cut it.
+- Cutting removes those raw frames from a **copy** of the project (the original
+  is never touched) and registers the copy so it appears in Creality Scan. You
+  open it there and run the fusion — it rebuilds without the moved section.
 
-- `backend/` — FastAPI szerver (Python). Mesh-feldolgozás [PyMeshLab](https://pymeshlab.readthedocs.io/)
-  + [trimesh](https://trimesh.org/); a nyers-projekt olvasás sima PLY-ból.
-- `frontend/` — React + Vite + [three.js](https://threejs.org/) felület.
-- `launcher.py` — rejtett módban indítja a szervert és megnyitja a böngészőt
-  (ebből készül a `3D Scan Doctor.exe` PyInstallerrel).
+### Project layout
+- `backend/` — FastAPI server (Python). Point-cloud read + surface-mesh preview
+  via [PyMeshLab](https://pymeshlab.readthedocs.io/) + [trimesh](https://trimesh.org/).
+- `frontend/` — React + Vite + [three.js](https://threejs.org/), with an
+  English/Hungarian language switch.
+- `launcher.py` — starts the server hidden and opens the browser (this is what
+  the standalone `.exe` is built from with PyInstaller).
 
-## Telepítés és futtatás
-
-**Backend** (Python 3.12 ajánlott):
+### Setup & run
 ```bash
+# backend (Python 3.12 recommended)
 python -m venv .venv
-.venv\Scripts\activate            # Windows
-pip install fastapi uvicorn pymeshlab trimesh numpy scipy python-multipart
-```
+.venv\Scripts\activate                 # Windows
+pip install -r backend/requirements.txt
 
-**Frontend** (Node.js):
-```bash
+# frontend (Node.js)
 cd frontend
 npm install
-npm run build      # a backend a frontend/dist-et szolgálja ki
-```
+npm run build                          # the backend serves frontend/dist
 
-**Indítás:**
+# start
+cd ../backend
+python main.py                         # http://127.0.0.1:8000
+```
+For development, run the frontend separately with `npm run dev` (in `frontend`).
+
+### Notes
+- Reads Creality Scan's local projects from
+  `%LOCALAPPDATA%\Creality\CrealityScan\Projects`, so Creality Scan projects
+  must exist on the machine (Creality Scan itself is needed to scan and to fuse).
+- **Not affiliated with Creality.** This is an independent interoperability tool
+  for fixing your own scans. Creality's own files/DLLs are **not** included.
+
+---
+
+## Magyar
+
+Eszköz **Creality Otter** (és hasonló) 3D szkennerrel készült **emberi szkenek**
+javítására. Ha az alany szkennelés közben bemozdul, a felület **kettőződik**
+("dupla héj"). Ezzel az eszközzel a szken **valódi keletkezési sorrendjében**
+lépegetsz végig, kijelölöd a bemozdulás pillanatát, és **kivágod azt a
+szakaszt** — utána a megtisztított projektet a Creality Scanben fuzionálod újra.
+
+### Hogyan működik
+- A nyers pontok közvetlenül a projekt sima szöveges `pc_after.ply` fájljából
+  jönnek, amit a szkenner **keletkezési (idő) sorrendben** ír — így egy pont
+  helye a fájlban a szkennelési időben elfoglalt helye. **Semmilyen jogvédett
+  Creality SDK vagy DLL nem kell és nem is használ.**
+- Egy alsó csúszka (Bambu Lab réteg-nézegető stílus) szabályozza, hogy a
+  szkennelési idő melyik szelete látszik; erre szűkíted a bemozdult szakaszt, és
+  kivágod.
+- A vágás a nyers képkockákat a projekt egy **másolatából** törli (az eredetihez
+  sosem nyúl), és bejegyzi a másolatot, hogy megjelenjen a Creality Scanben. Ott
+  megnyitod és lefuttatod a fúziót — a bemozdult szakasz nélkül áll össze.
+
+### Felépítés
+- `backend/` — FastAPI szerver (Python). Pontfelhő-olvasás + felület-előnézet
+  [PyMeshLab](https://pymeshlab.readthedocs.io/) + [trimesh](https://trimesh.org/).
+- `frontend/` — React + Vite + [three.js](https://threejs.org/), magyar/angol
+  nyelvváltóval.
+- `launcher.py` — rejtve indítja a szervert és megnyitja a böngészőt (ebből
+  készül a `.exe` PyInstallerrel).
+
+### Telepítés és futtatás
 ```bash
-cd backend
-python main.py     # http://127.0.0.1:8000
+# backend (Python 3.12 ajánlott)
+python -m venv .venv
+.venv\Scripts\activate                 # Windows
+pip install -r backend/requirements.txt
+
+# frontend (Node.js)
+cd frontend
+npm install
+npm run build                          # a backend a frontend/dist-et szolgálja ki
+
+# indítás
+cd ../backend
+python main.py                         # http://127.0.0.1:8000
 ```
-Vagy fejlesztéshez a frontend külön: `npm run dev` (a `frontend` mappában).
+Fejlesztéshez a frontend külön: `npm run dev` (a `frontend` mappában).
 
-## Megjegyzések
-
-- A **Nyers Szken Vágó** a Creality Scan lokális projektjeit olvassa
-  (`%LOCALAPPDATA%\Creality\CrealityScan\Projects`), és a `pc_after.ply` fájlból
-  dolgozik — a Creality Scan telepítése szükséges hozzá.
-- A projekt **nem áll kapcsolatban a Creality-vel**; interoperabilitási céllal
-  készült saját eszköz, a felhasználó saját szkenjeinek javítására.
+### Megjegyzések
+- A Creality Scan lokális projektjeit olvassa a
+  `%LOCALAPPDATA%\Creality\CrealityScan\Projects` mappából, tehát Creality Scan
+  projektek kellenek a gépen (szkennelni és fuzionálni a Creality Scan kell).
+- **Nem áll kapcsolatban a Creality-vel.** Ez egy független interoperabilitási
+  eszköz a saját szkenjeid javítására. Creality saját fájljai/DLL-jei **nincsenek**
+  benne.

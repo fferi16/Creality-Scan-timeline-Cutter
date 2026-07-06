@@ -59,6 +59,33 @@ body {
   gap: 0.75rem;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+.lang-switch {
+  display: flex;
+  gap: 0.2rem;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 0.2rem;
+  border-radius: 8px;
+}
+.lang-switch button {
+  padding: 0.25rem 0.6rem;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 0.8rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.lang-switch button.active {
+  background: var(--accent-blue);
+  color: #fff;
+}
+
 .logo-icon {
   width: 32px;
   height: 32px;

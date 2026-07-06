@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
+import { useT } from '../i18n';
 
 const BACKEND_URL = import.meta.env.DEV ? 'http://127.0.0.1:8000' : '';
 
@@ -17,6 +18,7 @@ function errText(detail) {
 // The raw cloud is stored in acquisition (time) order, so a point's position
 // in the array IS its position in scan time. That's what makes the timeline work.
 export default function RawEditor() {
+  const { t } = useT();
   const [projects, setProjects] = useState(null);
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [busy, setBusy] = useState(null); // status text while a job runs
@@ -175,7 +177,7 @@ export default function RawEditor() {
   }, [showMesh]);
 
   const loadProject = async (obp) => {
-    setBusy('Projekt másolása és betöltése… (nagy projektnél ez egy percig is tarthat)');
+    setBusy(t('busyLoad'));
     setLastCut(null);
     try {
       const r = await fetch(`${BACKEND_URL}/api/raw/load`, {
@@ -195,10 +197,10 @@ export default function RawEditor() {
   const doCut = async () => {
     if (!work) return;
     if (visHi - visLo >= 99.9) {
-      alert('Szűkítsd a csúszkát a kivágandó szakaszra — most az egész szken ki lenne vágva.');
+      alert(t('errWholeScan'));
       return;
     }
-    setBusy('Képkockák törlése és mentés a Creality projektbe…');
+    setBusy(t('busyCut'));
     try {
       const r = await fetch(`${BACKEND_URL}/api/raw/cut`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -213,22 +215,18 @@ export default function RawEditor() {
     <div className="raw-editor">
       <aside className="sidebar">
         <div className="sidebar-section">
-          <h3>🎞️ Nyers Szken Vágó</h3>
+          <h3>🎞️ {t('toolTitle')}</h3>
           <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-            Válaszd ki a szkennelt projektet. A szken pontjai <b>valódi szkennelési sorrendben</b> jelennek meg —
-            az alsó csúszkával végignézed az időt, kijelölöd a bemozdult szakaszt, és kivágod. A program azt a
-            szakaszt törli a nyers képkockákból, a <b>fúziót utána a Creality Scanben</b> végzed el.
+            {t('intro')}
           </p>
         </div>
 
         {!work && (
           <div className="sidebar-section" style={{ flex: 1, overflowY: 'auto' }}>
-            <h3>📂 Projektek</h3>
-            {loadingProjects && <p style={{ color: 'var(--accent-blue)' }}>Betöltés…</p>}
+            <h3>📂 {t('projects')}</h3>
+            {loadingProjects && <p style={{ color: 'var(--accent-blue)' }}>{t('loading')}</p>}
             {projects && projects.length === 0 && (
-              <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                Nem található CrealityScan projekt ezen a gépen.
-              </p>
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{t('noProjects')}</p>
             )}
             {projects && projects.map((p) => (
               <button key={p.obp} className="project-item" onClick={() => loadProject(p.obp)} disabled={!!busy}>
@@ -241,22 +239,16 @@ export default function RawEditor() {
 
         {work && (
           <div className="sidebar-section" style={{ flex: 1 }}>
-            <h3>⚙️ Vágás</h3>
+            <h3>⚙️ {t('cut')}</h3>
             <div className="stats-grid">
-              <div className="stat-item"><div className="stat-label">Pontok</div><div className="stat-value">{numPoints.toLocaleString('hu-HU')}</div></div>
-              <div className="stat-item"><div className="stat-label">Projekt</div><div className="stat-value" style={{ fontSize: '0.8rem' }}>{work.name}</div></div>
+              <div className="stat-item"><div className="stat-label">{t('points')}</div><div className="stat-value">{numPoints.toLocaleString()}</div></div>
+              <div className="stat-item"><div className="stat-label">{t('project')}</div><div className="stat-value" style={{ fontSize: '0.8rem' }}>{work.name}</div></div>
             </div>
 
-            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-              Az alsó csúszkával végignézed a szkennelést időben — csak a beállított szakasz látszik.
-              Állítsd a csúszkát a <b>bemozdult szakaszra</b>, és nyomd meg a kivágást: a program azt a
-              szakaszt törli a képkockákból, a fúziót a <b>Creality Scanben</b> végzed el rajta.
-            </p>
-
-            <label className="switch-control" style={{ cursor: 'pointer' }}>
+            <label className="switch-control" style={{ cursor: 'pointer', marginTop: '0.75rem' }}>
               <div className="switch-label">
-                <span className="switch-title">Modell felület</span>
-                <span className="switch-desc">A fúzionált felület mutatása a pontok alatt</span>
+                <span className="switch-title">{t('modelSurface')}</span>
+                <span className="switch-desc">{t('modelSurfaceDesc')}</span>
               </div>
               <label className="switch">
                 <input type="checkbox" checked={showMesh} onChange={(e) => setShowMesh(e.target.checked)} />
@@ -265,20 +257,22 @@ export default function RawEditor() {
             </label>
 
             <button className="btn-primary" onClick={doCut} disabled={!!busy} style={{ marginTop: '1rem' }}>
-              {busy ? 'Folyamatban…' : '✂️ Beállított szakasz kivágása'}
+              {busy ? t('inProgress') : t('cutButton')}
             </button>
             <button className="btn-secondary" onClick={() => { setWork(null); setLastCut(null); setVisLo(0); setVisHi(100); }} disabled={!!busy} style={{ marginTop: '0.5rem' }}>
-              ← Másik projekt
+              {t('anotherProject')}
             </button>
 
             {lastCut && (
               <div className="sidebar-section" style={{ background: 'rgba(16,185,129,0.05)', marginTop: '1rem' }}>
-                <h3>✅ Kivágva</h3>
+                <h3>{t('cutDoneTitle')}</h3>
                 <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                  {(lastCut.deleted_frames || 0).toLocaleString('hu-HU')} képkocka törölve
-                  (a szken {visLo.toFixed(0)}–{visHi.toFixed(0)}%-a). Nyisd meg a
-                  <b> {lastCut.work_id}</b> projektet a Creality Scanben, és futtasd le a fúziót —
-                  a bemozdult szakasz nélkül fog összeállni.
+                  {t('cutDoneDesc', {
+                    frames: (lastCut.deleted_frames || 0).toLocaleString(),
+                    from: visLo.toFixed(0),
+                    to: visHi.toFixed(0),
+                    name: lastCut.work_id,
+                  })}
                 </p>
               </div>
             )}
@@ -291,10 +285,9 @@ export default function RawEditor() {
           <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
           {!work && !busy && (
             <div className="loading-overlay" style={{ background: 'rgba(6,8,16,0.85)' }}>
-              <h2 style={{ fontFamily: 'Space Grotesk' }}>Válassz egy szkennelt projektet</h2>
+              <h2 style={{ fontFamily: 'Space Grotesk' }}>{t('placeholderTitle')}</h2>
               <p style={{ color: 'var(--text-secondary)', maxWidth: 420, textAlign: 'center' }}>
-                A pontok a szkennelés idejében színeződnek (kék → meleg). A bemozdulás jellemzően időben elkülönülő,
-                kettőződött rétegként tűnik fel.
+                {t('placeholderDesc')}
               </p>
             </div>
           )}
@@ -308,7 +301,7 @@ export default function RawEditor() {
           {work && !busy && (
             <div className="timeline-bar">
               <div className="timeline-head">
-                <span>⏱️ Szkennelési idő — csak a látható szakasz jelenik meg</span>
+                <span>⏱️ {t('timelineHead')}</span>
                 <span className="timeline-window">{visLo.toFixed(0)}% – {visHi.toFixed(0)}%</span>
               </div>
               <div className="timeline-track">
@@ -318,9 +311,12 @@ export default function RawEditor() {
                   onChange={(e) => setVisHi(Math.max(+e.target.value, visLo + 0.5))} />
               </div>
               <div className="timeline-labels">
-                <span>Szken eleje</span>
-                <span>{Math.round((visHi - visLo) / 100 * numPoints).toLocaleString('hu-HU')} / {numPoints.toLocaleString('hu-HU')} pont látszik</span>
-                <span>Szken vége</span>
+                <span>{t('scanStart')}</span>
+                <span>{t('pointsShown', {
+                  shown: Math.round((visHi - visLo) / 100 * numPoints).toLocaleString(),
+                  total: numPoints.toLocaleString(),
+                })}</span>
+                <span>{t('scanEnd')}</span>
               </div>
             </div>
           )}

@@ -7,8 +7,10 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 
-# --- build artifact (28 MB; distribute via GitHub Releases instead) ---
-3D Scan Doctor.exe
+# --- build artifacts (distribute via GitHub Releases instead) ---
+*.exe
+build_exe/
+dist_exe/
 
 # --- runtime data / logs (scans, temp, logs) ---
 backend/processed_downloads/

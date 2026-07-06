@@ -1,18 +1,13 @@
 """
-API for the raw-project timeline editor: browse Creality Scan projects, load a
-project's acquisition-ordered point cloud, and delete a time interval of it
-(which the SDK persists back into the project). The user then re-fuses the
-edited project inside Creality Scan.
-
-All SDK work runs in a one-shot subprocess (obscan_worker.py) so the SDK's
-crashy teardown can't take down this server.
+API for the timeline cutter: browse Creality Scan projects, load a project's
+acquisition-ordered point cloud (read straight from the plain-text pc_after.ply,
+no proprietary SDK needed), and delete a time interval by removing its raw
+frames from a copy. The user then re-fuses the edited project in Creality Scan.
 """
 import os
-import sys
 import glob as _glob
 import json
 import uuid
-import shutil
 import datetime
 import subprocess
 
@@ -26,7 +21,6 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-WORKER = os.path.join(BASE_DIR, "obscan_worker.py")
 PROCESSED_DIR = os.path.join(BASE_DIR, "processed_downloads")
 CREALITY_ROOT = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Creality", "CrealityScan")
 PROJECTS_DIR = os.path.join(CREALITY_ROOT, "Projects")
@@ -77,33 +71,8 @@ def _register_in_creality(work_dir):
 router = APIRouter(prefix="/api/raw", tags=["raw-editor"])
 
 
-def _run_worker(*args, timeout=600):
-    """Run the SDK worker subprocess and return the parsed JSON it prints.
-    The SDK spams stdout with logs, so we take the last line that parses as
-    JSON."""
-    proc = subprocess.run(
-        [sys.executable, WORKER, *args],
-        capture_output=True, text=True, timeout=timeout,
-    )
-    result = None
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if line.startswith("{") or line.startswith("["):
-            try:
-                result = json.loads(line)
-            except json.JSONDecodeError:
-                pass
-    if result is None:
-        tail = "\n".join(proc.stdout.splitlines()[-5:])
-        raise HTTPException(500, f"SDK worker gave no result. Tail:\n{tail}")
-    if isinstance(result, dict) and "error" in result:
-        raise HTTPException(500, result["error"])
-    return result
-
-
 def _is_creality_available():
-    return os.path.isdir(PROJECTS_DIR) and os.path.isfile(
-        r"C:\Program Files\CrealityScan\CrealityScan_Data\Plugins\x86_64\lib_orbbec_scan.dll")
+    return os.path.isdir(PROJECTS_DIR)
 
 
 class LoadRequest(BaseModel):
@@ -135,9 +104,24 @@ def thumb(path: str):
 
 @router.get("/projects")
 def projects():
+    """List Creality Scan projects by scanning the projects folder directly —
+    no SDK required. Skips our own `_vagott` edited copies."""
     if not _is_creality_available():
         raise HTTPException(400, "CrealityScan projektek nem találhatók ezen a gépen.")
-    return _run_worker("list", timeout=60)
+    out = []
+    for obp in _glob.glob(os.path.join(PROJECTS_DIR, "*", "project.obp")):
+        proj = os.path.dirname(obp)
+        if os.path.basename(proj).endswith(CUT_SUFFIX):
+            continue
+        thumb_path = os.path.join(proj, "thumbnail.png")
+        out.append({
+            "name": os.path.basename(proj),
+            "obp": obp,
+            "mtime": os.path.getmtime(proj),
+            "thumbnail": thumb_path if os.path.exists(thumb_path) else None,
+        })
+    out.sort(key=lambda p: p["mtime"], reverse=True)
+    return out
 
 
 def _work_dir_for(name):
