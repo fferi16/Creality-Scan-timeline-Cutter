@@ -294,45 +294,6 @@ def _cut_ply(src, dst, remove_mask):
     return n, len(keep)
 
 
-def _strip_fusion_artifacts(work_dir):
-    """Make the copy a fresh, un-fused project so Creality re-fuses from the
-    edited clouds. Creality stores the finished mesh both on disk (result/) and
-    cached inside resources.obscan (mesh_t_0/mesh_vn_0 = triangles/normals, plus
-    editDatas from manual edits), and shows that cache on open — so it must all
-    go. The raw frames, poses, config and the (edited) pc_before/after clouds are
-    kept, which is exactly a just-scanned, not-yet-fused project."""
-    import sqlite3
-    for sub in ("result", "temp"):
-        for d in _glob.glob(os.path.join(work_dir, "*", sub)):
-            shutil.rmtree(d, ignore_errors=True)
-    for ob in _glob.glob(os.path.join(work_dir, "*", "resources.obscan")):
-        try:
-            con = sqlite3.connect(ob)
-        except sqlite3.Error:
-            continue
-        try:
-            cur = con.cursor()
-            has_mesh = cur.execute(
-                "SELECT COUNT(*) FROM files WHERE name LIKE 'mesh\\_%' ESCAPE '\\'"
-            ).fetchone()[0]
-            has_edit = 0
-            try:
-                has_edit = cur.execute("SELECT COUNT(*) FROM editDatas").fetchone()[0]
-            except sqlite3.Error:
-                pass
-            if not (has_mesh or has_edit):
-                continue  # already stripped — skip the costly VACUUM
-            cur.execute("DELETE FROM files WHERE name LIKE 'mesh\\_%' ESCAPE '\\'")
-            try:
-                cur.execute("DELETE FROM editDatas")
-            except sqlite3.Error:
-                pass
-            con.commit()
-            con.execute("VACUUM")
-        finally:
-            con.close()
-
-
 @router.post("/cut")
 def cut(req: CutRequest):
     """Remove the selected time sections directly from the project's point clouds
@@ -388,12 +349,13 @@ def cut(req: CutRequest):
     if src_before:
         _cut_ply(src_before[0], _rel_in_copy(src_before[0]), mask)
 
-    # turn the copy back into a fresh, un-fused project: Creality caches the
-    # finished mesh (inside resources.obscan as mesh_t_0/mesh_vn_0, plus the
-    # result/ folder), and shows THAT on open — so a cut cloud alone changes
-    # nothing. Stripping every fusion artefact forces a real re-fusion from the
-    # edited clouds.
-    _strip_fusion_artifacts(work_dir)
+    # drop only the fusion working cache (safe — keeps the project valid); the
+    # finished mesh is left in place so Creality still opens the project.
+    for cache in _glob.glob(os.path.join(work_dir, "*", "temp", "*.obmc")):
+        try:
+            os.remove(cache)
+        except OSError:
+            pass
 
     _register_in_creality(work_dir)
     return {
