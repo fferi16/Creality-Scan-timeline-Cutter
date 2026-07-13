@@ -329,6 +329,14 @@ def cut(req: CutRequest):
         if b > a:
             mask[a:b] = True
     removed = int(mask.sum())
+    if removed == 0:
+        # No points selected — almost always a stale frontend that didn't send
+        # the cut range. Fail loudly instead of silently writing a full copy.
+        raise HTTPException(
+            400,
+            "A vágás 0 pontot távolítana el (nem érkezett kijelölés). Zárd be "
+            "teljesen a programot ÉS a böngészőt, majd indítsd újra, hogy a "
+            "javított verzió töltődjön be.")
     if removed >= total_points:
         raise HTTPException(400, "A teljes szken ki lenne vágva — szűkítsd a kijelölést.")
 
