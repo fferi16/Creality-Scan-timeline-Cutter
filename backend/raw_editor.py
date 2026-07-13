@@ -89,6 +89,10 @@ class CutRequest(BaseModel):
     # (the slider works in point/time order). The copy is always rebuilt from the
     # original minus the union of these, so repeated cuts never drift.
     ranges: list = []
+    # Backwards-compat: an older cached frontend sends a single interval this way
+    # instead of `ranges`. Accept it so a stale browser still cuts correctly.
+    start_pct: float | None = None
+    end_pct: float | None = None
 
 
 @router.get("/available")
@@ -318,8 +322,12 @@ def cut(req: CutRequest):
         raise HTTPException(400, "Ebben a projektben nincs pc_after.ply pontfelhő.")
 
     _, total_points, _, _ = _ply_parts(src_after[0])
+    # accept both the new `ranges` list and a legacy single start/end interval
+    ranges = list(req.ranges)
+    if not ranges and req.start_pct is not None and req.end_pct is not None:
+        ranges = [[req.start_pct, req.end_pct]]
     mask = np.zeros(total_points, dtype=bool)
-    for r in req.ranges:
+    for r in ranges:
         try:
             s, e = float(r[0]), float(r[1])
         except (TypeError, ValueError, IndexError):
