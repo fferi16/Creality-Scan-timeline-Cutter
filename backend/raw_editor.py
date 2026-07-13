@@ -262,15 +262,47 @@ def load(req: LoadRequest):
 def _frame_numbers(obscan_path):
     """Sorted depth-frame numbers of a resources.obscan (only reads names, so
     fast even on multi-GB files)."""
+    return [num for num, _sz in _frame_axis(obscan_path)]
+
+
+def _frame_axis(obscan_path):
+    """Sorted (frame_number, blob_size) for every depth frame. The blob size is
+    a proxy for how many points that frame contributed to pc_after.ply — each
+    frame is a fixed-resolution depth image, but only its valid pixels become
+    points, and the compressed size tracks that count. We only read name +
+    length(data) (no blob payload), so this stays fast on multi-GB files."""
     import re as _re
     import sqlite3
     con = sqlite3.connect(f"file:{obscan_path.replace(chr(92), '/')}?mode=ro", uri=True)
     try:
-        rows = con.execute("SELECT name FROM files WHERE name LIKE 'd~%'").fetchall()
+        rows = con.execute(
+            "SELECT name, length(data) FROM files WHERE name LIKE 'd~%'").fetchall()
     finally:
         con.close()
-    return sorted(int(m.group(1)) for (nm,) in rows
-                  for m in [_re.match(r"d~0*(\d+)", nm)] if m)
+    out = []
+    for nm, sz in rows:
+        m = _re.match(r"d~0*(\d+)", nm)
+        if m:
+            out.append((int(m.group(1)), sz or 0))
+    out.sort()
+    return out
+
+
+def _pct_to_frame(axis, pct):
+    """Map a slider percentage (a fraction of the *points* the user sees) to a
+    frame number. The timeline shows pc_after.ply points in capture order, so a
+    point's position in the cloud is a point-count fraction, not a frame-count
+    fraction — the two diverge when frames contribute uneven point counts (fast
+    motion, tracking loss on human scans). We therefore place the cut by
+    cumulative point weight, so what gets deleted matches what was selected."""
+    total = sum(sz for _n, sz in axis) or 1
+    target = max(0.0, min(1.0, pct / 100.0)) * total
+    acc = 0
+    for num, sz in axis:
+        acc += sz
+        if acc >= target:
+            return num
+    return axis[-1][0]
 
 
 @router.post("/cut")
@@ -293,12 +325,14 @@ def cut(req: CutRequest):
     src_obscan = _glob.glob(os.path.join(src_dir, "*", "resources.obscan"))
     if not src_obscan:
         raise HTTPException(400, "Nincsenek nyers képkockák ebben a projektben.")
-    orig_nums = _frame_numbers(src_obscan[0])
-    if not orig_nums:
+    axis = _frame_axis(src_obscan[0])
+    if not axis:
         raise HTTPException(400, "Nincsenek nyers képkockák ebben a projektben.")
-    n = len(orig_nums)
-    lo = orig_nums[min(n - 1, int(req.start_pct / 100.0 * n))]
-    hi = orig_nums[min(n - 1, int(req.end_pct / 100.0 * n))]
+    n = len(axis)
+    # place the window by point weight (see _pct_to_frame) so the deleted frames
+    # line up with the section the user isolated on the point-cloud slider
+    lo = _pct_to_frame(axis, req.start_pct)
+    hi = _pct_to_frame(axis, req.end_pct)
 
     if not os.path.isdir(work_dir):
         subprocess.run(
