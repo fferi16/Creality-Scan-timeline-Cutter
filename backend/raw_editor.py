@@ -1,8 +1,10 @@
 """
 API for the timeline cutter: browse Creality Scan projects, load a project's
 acquisition-ordered point cloud (read straight from the plain-text pc_after.ply,
-no proprietary SDK needed), and delete a time interval by removing its raw
-frames from a copy. The user then re-fuses the edited project in Creality Scan.
+no proprietary SDK needed), and delete time intervals by removing those points
+from the project's registered clouds (pc_after.ply + pc_before.ply) in a copy.
+The user then re-fuses the edited project in Creality Scan — which builds the
+mesh from those clouds, so the cut sections are gone.
 """
 import os
 import glob as _glob
@@ -83,9 +85,10 @@ class LoadRequest(BaseModel):
 
 class CutRequest(BaseModel):
     obp: str            # the ORIGINAL project's project.obp (copied on cut)
-    start_pct: float    # 0..100 — interval start as % of scan time
-    end_pct: float      # 0..100 — interval end
-    reset: bool = False  # start over: rebuild the copy fresh before this cut
+    # Every cut section, as [start_pct, end_pct] over the ORIGINAL point cloud
+    # (the slider works in point/time order). The copy is always rebuilt from the
+    # original minus the union of these, so repeated cuts never drift.
+    ranges: list = []
 
 
 @router.get("/available")
@@ -259,61 +262,48 @@ def load(req: LoadRequest):
     }
 
 
-def _frame_numbers(obscan_path):
-    """Sorted depth-frame numbers of a resources.obscan (only reads names, so
-    fast even on multi-GB files)."""
-    return [num for num, _sz in _frame_axis(obscan_path)]
+def _ply_parts(path):
+    """Return (header_bytes, vertex_count, prop_count, body_bytes) for a
+    binary-little-endian float32 PLY, preserving the header verbatim."""
+    import numpy as np
+    with open(path, "rb") as f:
+        header = b""
+        while b"end_header\n" not in header:
+            chunk = f.read(1)
+            if not chunk:
+                raise ValueError("nem PLY fejléc")
+            header += chunk
+        lines = header.split(b"\n")
+        n = int(next(l for l in lines if l.startswith(b"element vertex")).split()[-1])
+        nprop = sum(1 for l in lines if l.startswith(b"property"))
+        body = np.frombuffer(f.read(n * nprop * 4), dtype="<f4").reshape(n, nprop)
+    return header, n, nprop, body
 
 
-def _frame_axis(obscan_path):
-    """Sorted (frame_number, blob_size) for every depth frame. The blob size is
-    a proxy for how many points that frame contributed to pc_after.ply — each
-    frame is a fixed-resolution depth image, but only its valid pixels become
-    points, and the compressed size tracks that count. We only read name +
-    length(data) (no blob payload), so this stays fast on multi-GB files."""
-    import re as _re
-    import sqlite3
-    con = sqlite3.connect(f"file:{obscan_path.replace(chr(92), '/')}?mode=ro", uri=True)
-    try:
-        rows = con.execute(
-            "SELECT name, length(data) FROM files WHERE name LIKE 'd~%'").fetchall()
-    finally:
-        con.close()
-    out = []
-    for nm, sz in rows:
-        m = _re.match(r"d~0*(\d+)", nm)
-        if m:
-            out.append((int(m.group(1)), sz or 0))
-    out.sort()
-    return out
-
-
-def _pct_to_frame(axis, pct):
-    """Map a slider percentage (a fraction of the *points* the user sees) to a
-    frame number. The timeline shows pc_after.ply points in capture order, so a
-    point's position in the cloud is a point-count fraction, not a frame-count
-    fraction — the two diverge when frames contribute uneven point counts (fast
-    motion, tracking loss on human scans). We therefore place the cut by
-    cumulative point weight, so what gets deleted matches what was selected."""
-    total = sum(sz for _n, sz in axis) or 1
-    target = max(0.0, min(1.0, pct / 100.0)) * total
-    acc = 0
-    for num, sz in axis:
-        acc += sz
-        if acc >= target:
-            return num
-    return axis[-1][0]
+def _cut_ply(src, dst, remove_mask):
+    """Copy `src` PLY to `dst` with the masked-out vertices removed, rewriting the
+    vertex count in the header. Points are dropped by array index, i.e. by their
+    place in scan time — exactly the section the user isolated on the slider."""
+    header, n, nprop, body = _ply_parts(src)
+    keep = body[~remove_mask[:n]]
+    new_header = header.replace(
+        b"element vertex %d\n" % n, b"element vertex %d\n" % len(keep))
+    with open(dst, "wb") as f:
+        f.write(new_header)
+        f.write(keep.astype("<f4").tobytes())
+    return n, len(keep)
 
 
 @router.post("/cut")
 def cut(req: CutRequest):
-    """Delete a time interval of the scan by removing its RAW FRAMES from a copy
-    of the project, so Creality Scan re-fuses without them. Multiple cuts on one
-    project accumulate on the same copy; `reset` rebuilds it fresh. The interval
-    is mapped against the ORIGINAL frame list, so every cut's % means the same
-    scan time no matter how many frames were already removed."""
-    import re as _re
-    import sqlite3
+    """Remove the selected time sections directly from the project's point clouds
+    (pc_after.ply + pc_before.ply) in a copy, then let the user re-fuse in
+    Creality Scan. Creality fuses the mesh from these registered clouds, NOT from
+    the raw depth frames, so editing the clouds is what actually drops a section.
+    The clouds are in capture (time) order, so a point's index is its position in
+    scan time and the slider selection maps to it 1:1. The copy is always rebuilt
+    from the original minus the union of `ranges`, so repeated cuts never drift."""
+    import numpy as np
     if not os.path.isfile(req.obp):
         raise HTTPException(404, "A projektfájl nem található.")
     src_dir = os.path.dirname(req.obp)
@@ -321,55 +311,57 @@ def cut(req: CutRequest):
     work_dir = _work_dir_for(name)
     work_id = name + CUT_SUFFIX
 
-    # map % against the ORIGINAL scan's frames (stable across repeated cuts)
-    src_obscan = _glob.glob(os.path.join(src_dir, "*", "resources.obscan"))
-    if not src_obscan:
-        raise HTTPException(400, "Nincsenek nyers képkockák ebben a projektben.")
-    axis = _frame_axis(src_obscan[0])
-    if not axis:
-        raise HTTPException(400, "Nincsenek nyers képkockák ebben a projektben.")
-    n = len(axis)
-    # place the window by point weight (see _pct_to_frame) so the deleted frames
-    # line up with the section the user isolated on the point-cloud slider
-    lo = _pct_to_frame(axis, req.start_pct)
-    hi = _pct_to_frame(axis, req.end_pct)
+    # the clouds Creality fuses from (same session subfolder, same point order)
+    src_after = _glob.glob(os.path.join(src_dir, "*", "pc_after.ply"))
+    src_before = _glob.glob(os.path.join(src_dir, "*", "pc_before.ply"))
+    if not src_after:
+        raise HTTPException(400, "Ebben a projektben nincs pc_after.ply pontfelhő.")
 
+    _, total_points, _, _ = _ply_parts(src_after[0])
+    mask = np.zeros(total_points, dtype=bool)
+    for r in req.ranges:
+        try:
+            s, e = float(r[0]), float(r[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        a = max(0, min(total_points, int(round(s / 100.0 * total_points))))
+        b = max(0, min(total_points, int(round(e / 100.0 * total_points))))
+        if b > a:
+            mask[a:b] = True
+    removed = int(mask.sum())
+    if removed >= total_points:
+        raise HTTPException(400, "A teljes szken ki lenne vágva — szűkítsd a kijelölést.")
+
+    # make/refresh the copy (one-time full copy; then only the light PLYs change)
     if not os.path.isdir(work_dir):
         subprocess.run(
             ["robocopy", src_dir, work_dir, "/E", "/MT:16", "/J",
              "/NFL", "/NDL", "/NJH", "/NJS", "/NP"],
             capture_output=True,
         )
-    obscan_hits = _glob.glob(os.path.join(work_dir, "*", "resources.obscan"))
-    if not obscan_hits:
-        raise HTTPException(500, "Nem találom a resources.obscan-t a másolatban.")
-    if req.reset:
-        # "start over": restore the only file we edit (the frames DB) from the
-        # original, bringing every previously-cut frame back before this cut.
-        shutil.copy2(src_obscan[0], obscan_hits[0])
 
-    con = sqlite3.connect(obscan_hits[0])
-    try:
-        cur = con.cursor()
-        deleted = 0  # depth frames only, so it's on the same basis as total/remaining
-        for (nm,) in con.execute("SELECT name FROM files WHERE name LIKE 'd~%' OR name LIKE 'c~%'").fetchall():
-            m = _re.match(r"[dc]~0*(\d+)", nm)
-            if m and lo <= int(m.group(1)) <= hi:
-                cur.execute("DELETE FROM files WHERE name=?", (nm,))
-                if nm.startswith("d~"):
-                    deleted += 1
-        con.commit()
-        con.execute("VACUUM")
-        remaining = con.execute("SELECT COUNT(*) FROM files WHERE name LIKE 'd~%'").fetchone()[0]
-    finally:
-        con.close()
+    # rewrite the copy's clouds from the ORIGINAL, minus the cut sections
+    def _rel_in_copy(src_ply):
+        rel = os.path.relpath(src_ply, src_dir)
+        return os.path.join(work_dir, rel)
+
+    _cut_ply(src_after[0], _rel_in_copy(src_after[0]), mask)
+    if src_before:
+        _cut_ply(src_before[0], _rel_in_copy(src_before[0]), mask)
+
+    # drop the fusion cache so Creality re-fuses from the edited clouds instead
+    # of showing the cached result
+    for cache in _glob.glob(os.path.join(work_dir, "*", "temp", "*.obmc")):
+        try:
+            os.remove(cache)
+        except OSError:
+            pass
 
     _register_in_creality(work_dir)
     return {
         "work_id": work_id,
         "work_dir": work_dir,
-        "deleted_frames": deleted,
-        "remaining_frames": remaining,
-        "total_frames": n,
-        "frame_window": [lo, hi],
+        "removed_points": removed,
+        "remaining_points": total_points - removed,
+        "total_points": total_points,
     }

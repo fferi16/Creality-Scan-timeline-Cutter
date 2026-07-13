@@ -9,7 +9,7 @@ const translations = {
 
     toolTitle: 'Timeline Cutter',
     intro:
-      'Pick a scanned project. Its points appear in the real scan order — use the bottom slider to scrub through time, isolate the section where the subject moved, and cut it. The cut removes those raw frames, so re-fusing in Creality Scan rebuilds the model without them.',
+      'Pick a scanned project. Its points appear in the real scan order — use the bottom slider to scrub through time, isolate the section where the subject moved, and cut it. The cut removes those points from the scan cloud, so re-fusing in Creality Scan rebuilds the model without them.',
 
     projects: 'Projects',
     loading: 'Loading…',
@@ -28,8 +28,8 @@ const translations = {
 
     cutsHeader: '✅ Cuts made',
     startOver: '↺ Start over',
-    cutRow: '{from}–{to}% · {frames} frames',
-    keepInfo: '{remaining} / {total} frames kept',
+    cutRow: '{from}–{to}% · {points} points',
+    keepInfo: '{remaining} / {total} points kept',
     crealityHint:
       'Open the {name} project in Creality Scan and run the fusion — it rebuilds without the removed sections.',
 
@@ -38,7 +38,7 @@ const translations = {
       'Points are coloured by scan time (blue → warm). Motion typically shows up as a time-separated, doubled layer.',
 
     busyLoad: 'Copying and loading the project…',
-    busyCut: 'Removing frames and saving to the Creality project…',
+    busyCut: 'Removing points and saving to the Creality project…',
 
     timelineHead: 'Scan time — only the visible section is shown',
     scanStart: 'Scan start',
@@ -55,7 +55,7 @@ const translations = {
 
     toolTitle: 'Idő-alapú vágó',
     intro:
-      'Válaszd ki a szkennelt projektet. A pontok a valódi szkennelési sorrendben jelennek meg — az alsó csúszkával végignézed az időt, kijelölöd a bemozdult szakaszt, és kivágod. A vágás a nyers képkockákat törli, így a Creality Scanben újrafuzionálva a hibás szakasz nélkül áll össze a modell.',
+      'Válaszd ki a szkennelt projektet. A pontok a valódi szkennelési sorrendben jelennek meg — az alsó csúszkával végignézed az időt, kijelölöd a bemozdult szakaszt, és kivágod. A vágás ezeket a pontokat törli a szken felhőjéből, így a Creality Scanben újrafuzionálva a hibás szakasz nélkül áll össze a modell.',
 
     projects: 'Projektek',
     loading: 'Betöltés…',
@@ -74,8 +74,8 @@ const translations = {
 
     cutsHeader: '✅ Vágások',
     startOver: '↺ Újrakezdés',
-    cutRow: '{from}–{to}% · {frames} képkocka',
-    keepInfo: '{remaining} / {total} képkocka maradt',
+    cutRow: '{from}–{to}% · {points} pont',
+    keepInfo: '{remaining} / {total} pont maradt',
     crealityHint:
       'Nyisd meg a {name} projektet a Creality Scanben, és futtasd le a fúziót — a kivágott szakaszok nélkül áll össze.',
 
@@ -84,7 +84,7 @@ const translations = {
       'A pontok a szkennelés idejében színeződnek (kék → meleg). A bemozdulás jellemzően időben elkülönülő, kettőződött rétegként tűnik fel.',
 
     busyLoad: 'Projekt másolása és betöltése…',
-    busyCut: 'Képkockák törlése és mentés a Creality projektbe…',
+    busyCut: 'Pontok törlése és mentés a Creality projektbe…',
 
     timelineHead: 'Szkennelési idő — csak a látható szakasz jelenik meg',
     scanStart: 'Szken eleje',

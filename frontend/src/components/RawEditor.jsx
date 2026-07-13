@@ -29,8 +29,7 @@ export default function RawEditor() {
   // print layers). "Cut" removes exactly this window's frames.
   const [visLo, setVisLo] = useState(0);
   const [visHi, setVisHi] = useState(100);
-  const [cuts, setCuts] = useState([]); // [{ lo, hi, frames }] — sections removed so far
-  const firstCutRef = useRef(true);     // first cut after load rebuilds the copy fresh
+  const [cuts, setCuts] = useState([]); // [{ lo, hi, removed_points }] — sections removed so far
 
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
@@ -198,7 +197,6 @@ export default function RawEditor() {
   const loadProject = async (obp) => {
     setBusy(t('busyLoad'));
     setCuts([]);
-    firstCutRef.current = true;
     try {
       const r = await fetch(`${BACKEND_URL}/api/raw/load`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -222,23 +220,24 @@ export default function RawEditor() {
     }
     setBusy(t('busyCut'));
     const lo = visLo, hi = visHi;
+    // send every cut section: the copy is rebuilt from the original minus all of
+    // them, so repeated cuts stay exact (no drift from earlier removals)
+    const ranges = [...cuts.map((c) => [c.lo, c.hi]), [lo, hi]];
     try {
       const r = await fetch(`${BACKEND_URL}/api/raw/cut`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ obp: work.obp, start_pct: lo, end_pct: hi, reset: firstCutRef.current }),
+        body: JSON.stringify({ obp: work.obp, ranges }),
       });
       if (!r.ok) throw new Error(errText((await r.json().catch(() => ({}))).detail));
       const data = await r.json();
-      firstCutRef.current = false;
       // remember this section (for the grey overlay + the list); keep editing
-      setCuts((prev) => [...prev, { lo, hi, frames: data.deleted_frames, ...data }]);
+      setCuts((prev) => [...prev, { lo, hi, ...data }]);
       setVisLo(0); setVisHi(100); // reset the window so the whole scan is visible again
     } catch (e) { alert(e.message || String(e)); } finally { setBusy(null); }
   };
 
   const startOver = () => {
     setCuts([]);
-    firstCutRef.current = true; // next cut rebuilds the copy from the original
     setVisLo(0); setVisHi(100);
   };
 
@@ -300,14 +299,14 @@ export default function RawEditor() {
                 <div className="cut-list">
                   {cuts.map((c, i) => (
                     <div key={i} className="cut-row">
-                      {t('cutRow', { from: c.lo.toFixed(2), to: c.hi.toFixed(2), frames: c.frames })}
+                      {t('cutRow', { from: c.lo.toFixed(2), to: c.hi.toFixed(2), points: (c.removed_points ?? 0).toLocaleString() })}
                     </div>
                   ))}
                 </div>
                 <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', margin: '0.5rem 0' }}>
                   {t('keepInfo', {
-                    remaining: (cuts[cuts.length - 1].remaining_frames ?? 0).toLocaleString(),
-                    total: (cuts[cuts.length - 1].total_frames ?? 0).toLocaleString(),
+                    remaining: (cuts[cuts.length - 1].remaining_points ?? 0).toLocaleString(),
+                    total: (cuts[cuts.length - 1].total_points ?? 0).toLocaleString(),
                   })}
                 </p>
                 <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
