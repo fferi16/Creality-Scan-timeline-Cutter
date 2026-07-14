@@ -284,6 +284,42 @@ def _ply_parts(path):
     return header, n, nprop, body
 
 
+def _frame_axis(obscan_path):
+    """Sorted (frame_number, blob_size) for every depth frame in a
+    resources.obscan. Only reads name + length(data), so it stays fast on
+    multi-GB files. The blob size tracks how many valid pixels (= points) the
+    frame contributed, which lets us map slider percentages onto frames."""
+    import re as _re
+    import sqlite3
+    con = sqlite3.connect(f"file:{obscan_path.replace(chr(92), '/')}?mode=ro", uri=True)
+    try:
+        rows = con.execute(
+            "SELECT name, length(data) FROM files WHERE name LIKE 'd~%'").fetchall()
+    finally:
+        con.close()
+    out = []
+    for nm, sz in rows:
+        m = _re.match(r"d~0*(\d+)", nm)
+        if m:
+            out.append((int(m.group(1)), sz or 0))
+    out.sort()
+    return out
+
+
+def _pct_to_frame(axis, pct):
+    """Map a slider percentage (a fraction of the *points* the user sees) to a
+    frame number by cumulative point weight, so the deleted frames line up with
+    the section isolated on the point-cloud timeline."""
+    total = sum(sz for _n, sz in axis) or 1
+    target = max(0.0, min(1.0, pct / 100.0)) * total
+    acc = 0
+    for num, sz in axis:
+        acc += sz
+        if acc >= target:
+            return num
+    return axis[-1][0]
+
+
 def _cut_ply(src, dst, remove_mask):
     """Copy `src` PLY to `dst` with the masked-out vertices removed, rewriting the
     vertex count in the header. Points are dropped by array index, i.e. by their
@@ -365,8 +401,67 @@ def cut(req: CutRequest):
     if src_before:
         _cut_ply(src_before[0], _rel_in_copy(src_before[0]), mask)
 
-    # drop only the fusion working cache (safe — keeps the project valid); the
-    # finished mesh is left in place so Creality still opens the project.
+    # THE cut that fusion actually sees: Creality re-fuses from the RAW DEPTH
+    # FRAMES inside resources.obscan, not from the pc_*.ply exports (proven by
+    # feeding fusion a 5%-point cloud and still getting a full-body result). So
+    # delete the selected sections' d~/c~ frames from the copy's obscan. The
+    # copy's obscan is refreshed from the original first, so repeated cuts are
+    # always applied to a clean base and never drift.
+    frames_deleted = frames_remaining = frames_total = None
+    src_obscan = _glob.glob(os.path.join(src_dir, "*", "resources.obscan"))
+    if src_obscan:
+        import re as _re
+        import sqlite3
+        dst_obscan = _rel_in_copy(src_obscan[0])
+        try:
+            shutil.copy2(src_obscan[0], dst_obscan)
+            # the fresh main file must not be paired with the copy's stale
+            # WAL/SHM sidecars — sync them with the original (its WAL is empty
+            # after a clean close) or drop them.
+            for ext in ("-wal", "-shm"):
+                if os.path.exists(src_obscan[0] + ext):
+                    shutil.copy2(src_obscan[0] + ext, dst_obscan + ext)
+                elif os.path.exists(dst_obscan + ext):
+                    os.remove(dst_obscan + ext)
+        except OSError:
+            raise HTTPException(
+                409, "Nem tudom frissíteni a másolat adatbázisát — zárd be a "
+                     "Creality Scant, és vágj újra.")
+        axis = _frame_axis(dst_obscan)
+        if axis:
+            frames_total = len(axis)
+            windows = [(_pct_to_frame(axis, float(r[0])), _pct_to_frame(axis, float(r[1])))
+                       for r in ranges if float(r[1]) > float(r[0])]
+            con = sqlite3.connect(dst_obscan)
+            try:
+                cur = con.cursor()
+                frames_deleted = 0
+                for (nm,) in con.execute(
+                        "SELECT name FROM files WHERE name LIKE 'd~%' OR name LIKE 'c~%'").fetchall():
+                    m = _re.match(r"[dc]~0*(\d+)", nm)
+                    if m and any(lo <= int(m.group(1)) <= hi for lo, hi in windows):
+                        cur.execute("DELETE FROM files WHERE name=?", (nm,))
+                        if nm.startswith("d~"):
+                            frames_deleted += 1
+                con.commit()
+                con.execute("VACUUM")
+                frames_remaining = con.execute(
+                    "SELECT COUNT(*) FROM files WHERE name LIKE 'd~%'").fetchone()[0]
+            finally:
+                con.close()
+            # keep the copy's advertised frame count in sync with reality
+            pi = os.path.join(work_dir, "ProjectInfo.json")
+            if frames_remaining is not None and os.path.isfile(pi):
+                try:
+                    with open(pi, "r", encoding="utf-8") as f:
+                        info = json.load(f)
+                    info["FrameCount"] = frames_remaining
+                    with open(pi, "w", encoding="utf-8") as f:
+                        json.dump(info, f, ensure_ascii=False)
+                except (OSError, ValueError):
+                    pass
+
+    # drop the fusion working cache so Creality rebuilds instead of reusing it
     for cache in _glob.glob(os.path.join(work_dir, "*", "temp", "*.obmc")):
         try:
             os.remove(cache)
@@ -380,4 +475,7 @@ def cut(req: CutRequest):
         "removed_points": removed,
         "remaining_points": total_points - removed,
         "total_points": total_points,
+        "deleted_frames": frames_deleted,
+        "remaining_frames": frames_remaining,
+        "total_frames": frames_total,
     }
