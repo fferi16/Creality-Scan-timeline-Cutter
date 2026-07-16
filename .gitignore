@@ -11,6 +11,9 @@ frontend/dist/
 *.exe
 build_exe/
 dist_exe/
+build/
+dist/
+*.spec
 
 # --- runtime data / logs (scans, temp, logs) ---
 backend/processed_downloads/

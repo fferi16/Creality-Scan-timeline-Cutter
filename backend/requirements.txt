@@ -3,3 +3,8 @@ uvicorn==0.50.0
 pymeshlab==2025.7.post1
 trimesh==4.12.2
 numpy==2.5.0
+
+# desktop app window (launcher.py) — Edge WebView2-based native window
+pywebview==6.2.1
+# only needed to BUILD the .exe (pyinstaller --onefile --windowed launcher.py)
+pyinstaller==6.21.0

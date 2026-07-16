@@ -28,8 +28,10 @@ project in Creality Scan.
   via [PyMeshLab](https://pymeshlab.readthedocs.io/) + [trimesh](https://trimesh.org/).
 - `frontend/` — React + Vite + [three.js](https://threejs.org/), with an
   English/Hungarian language switch.
-- `launcher.py` — starts the server hidden and opens the browser (this is what
-  the standalone `.exe` is built from with PyInstaller).
+- `launcher.py` — the desktop app: opens the tool in its own native window
+  (Edge WebView2, no browser), starts the backend invisibly on a free port,
+  and shuts it down when the window closes (this is what the standalone
+  `.exe` is built from with PyInstaller).
 
 ### Setup & run
 ```bash
@@ -83,8 +85,10 @@ szakaszt** — utána a megtisztított projektet a Creality Scanben fuzionálod 
   [PyMeshLab](https://pymeshlab.readthedocs.io/) + [trimesh](https://trimesh.org/).
 - `frontend/` — React + Vite + [three.js](https://threejs.org/), magyar/angol
   nyelvváltóval.
-- `launcher.py` — rejtve indítja a szervert és megnyitja a böngészőt (ebből
-  készül a `.exe` PyInstallerrel).
+- `launcher.py` — az asztali alkalmazás: saját natív ablakban nyitja meg az
+  eszközt (Edge WebView2, böngésző nélkül), a szervert láthatatlanul, szabad
+  porton indítja, és az ablak bezárásakor le is állítja (ebből készül a
+  `.exe` PyInstallerrel).
 
 ### Telepítés és futtatás
 ```bash
