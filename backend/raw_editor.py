@@ -306,18 +306,20 @@ def _frame_axis(obscan_path):
     return out
 
 
-def _pct_to_frame(axis, pct):
-    """Map a slider percentage (a fraction of the *points* the user sees) to a
-    frame number by cumulative point weight, so the deleted frames line up with
-    the section isolated on the point-cloud timeline."""
-    total = sum(sz for _n, sz in axis) or 1
-    target = max(0.0, min(1.0, pct / 100.0)) * total
-    acc = 0
-    for num, sz in axis:
-        acc += sz
-        if acc >= target:
-            return num
-    return axis[-1][0]
+def _pct_to_index(axis, pct):
+    """Map a slider percentage to a POSITION in the capture-ordered frame list —
+    the same way the point mask maps it onto the cloud, so the frames deleted and
+    the points deleted describe the same slice of scan time.
+
+    This used to weight frames by their compressed blob size, on the assumption
+    that size tracks how many points a frame contributed. It does not: every
+    frame is a fixed 640x400 depth image, so the stored size is a compression
+    artefact of that image's entropy. Measured against the real frame lists it
+    put the cut between 0.6x and 2.2x away from the selection (e.g. a 7.8%
+    selection deleted 12.5% of the scan), which is why cuts removed the wrong
+    section."""
+    k = len(axis)
+    return max(0, min(k, int(round(max(0.0, min(1.0, pct / 100.0)) * k))))
 
 
 def _cut_ply(src, dst, remove_mask):
@@ -363,6 +365,10 @@ def cut(req: CutRequest):
     if not ranges and req.start_pct is not None and req.end_pct is not None:
         ranges = [[req.start_pct, req.end_pct]]
     mask = np.zeros(total_points, dtype=bool)
+    # keep the ranges that actually select something — the frame cut below must
+    # use exactly these, or a malformed entry would be skipped here and still
+    # blow up (or delete frames) there.
+    valid_ranges = []
     for r in ranges:
         try:
             s, e = float(r[0]), float(r[1])
@@ -372,6 +378,7 @@ def cut(req: CutRequest):
         b = max(0, min(total_points, int(round(e / 100.0 * total_points))))
         if b > a:
             mask[a:b] = True
+            valid_ranges.append((s, e))
     removed = int(mask.sum())
     if removed == 0:
         # No points selected — almost always a stale frontend that didn't send
@@ -430,8 +437,17 @@ def cut(req: CutRequest):
         axis = _frame_axis(dst_obscan)
         if axis:
             frames_total = len(axis)
-            windows = [(_pct_to_frame(axis, float(r[0])), _pct_to_frame(axis, float(r[1])))
-                       for r in ranges if float(r[1]) > float(r[0])]
+            # closed frame-NUMBER windows, derived from list positions. Frame
+            # numbers are not contiguous (dropped frames leave gaps), but they
+            # are ordered, so a number window still selects a contiguous run in
+            # scan time — and the colour (c~) frames share this numbering, so
+            # the same window picks up their matching frames too.
+            windows = []
+            for s, e in valid_ranges:
+                a = _pct_to_index(axis, s)
+                b = _pct_to_index(axis, e)
+                if b > a:
+                    windows.append((axis[a][0], axis[b - 1][0]))
             con = sqlite3.connect(dst_obscan)
             try:
                 cur = con.cursor()
