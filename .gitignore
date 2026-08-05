@@ -28,3 +28,6 @@ backend/GPPLog.txt
 .vscode/
 .idea/
 *.log
+
+# --- helyi munkanaplo (nem publikus) ---
+TEENDOK.md
