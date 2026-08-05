@@ -3,6 +3,10 @@ uvicorn==0.50.0
 pymeshlab==2025.7.post1
 trimesh==4.12.2
 numpy==2.5.0
+# nearest-neighbour match between the capture-ordered cloud and the SDK's
+# voxel-ordered one (obscan_sdk.py) — this is what maps scan time onto the
+# points the SDK can delete
+scipy==1.18.0
 
 # desktop app window (launcher.py) — Edge WebView2-based native window
 pywebview==6.2.1

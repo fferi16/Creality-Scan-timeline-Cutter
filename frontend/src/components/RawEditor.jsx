@@ -30,6 +30,15 @@ export default function RawEditor() {
   const [visLo, setVisLo] = useState(0);
   const [visHi, setVisHi] = useState(100);
   const [cuts, setCuts] = useState([]); // [{ lo, hi, removed_points }] — sections removed so far
+  // When Creality Scan is installed we drive its own SDK: it does the cut AND
+  // rebuilds the mesh, so the user gets a finished project instead of having to
+  // re-fuse by hand. Without it we fall back to the manual cut.
+  const [sdk, setSdk] = useState(false);
+  // Re-fusing a full body scan takes minutes and can run out of memory, so it
+  // is the user's call. Off still gives a correctly cut project — only its mesh
+  // is stale, and Creality Scan fuses it in one click.
+  const [refuse, setRefuse] = useState(true);
+  const [meshBusy, setMeshBusy] = useState(false);
 
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
@@ -88,21 +97,33 @@ export default function RawEditor() {
       .then(setProjects)
       .catch(() => setProjects([]))
       .finally(() => setLoadingProjects(false));
+    fetch(`${BACKEND_URL}/api/raw/sdk_available`)
+      .then((r) => (r.ok ? r.json() : { available: false }))
+      .then((d) => setSdk(!!d.available))
+      .catch(() => setSdk(false));
   }, []);
 
   // ---- load the fused surface mesh (what makes the view recognisable) ----
-  const renderMesh = useCallback((url) => new Promise((resolve) => {
+  // `reuseTransform` matters when the surface is switched on after the cloud is
+  // already drawn: deriving a fresh transform from the mesh would shift it off
+  // the points. Both are in metres, so the cloud's transform fits the mesh too.
+  const renderMesh = useCallback((url, reuseTransform = false) => new Promise((resolve) => {
     const scene = sceneRef.current;
     if (meshRef.current) { scene.remove(meshRef.current); meshRef.current = null; }
     if (!url) return resolve(false);
     new GLTFLoader().load(`${BACKEND_URL}${url}`, (gltf) => {
       const model = gltf.scene;
-      // the mesh spans the whole model, so derive the shared transform from it
-      const box = new THREE.Box3().setFromObject(model);
-      const center = box.getCenter(new THREE.Vector3());
-      const size = box.getSize(new THREE.Vector3());
-      const scale = 2 / (Math.max(size.x, size.y, size.z) || 1);
-      xformRef.current = { center, scale };
+      let center, scale;
+      if (reuseTransform) {
+        ({ center, scale } = xformRef.current);
+      } else {
+        // the mesh spans the whole model, so derive the shared transform from it
+        const box = new THREE.Box3().setFromObject(model);
+        center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        scale = 2 / (Math.max(size.x, size.y, size.z) || 1);
+        xformRef.current = { center, scale };
+      }
       model.scale.setScalar(scale);
       model.position.set(-center.x * scale, -center.y * scale, -center.z * scale);
       model.traverse((ch) => {
@@ -188,11 +209,23 @@ export default function RawEditor() {
     col.needsUpdate = true;
   }, [cuts, numPoints]);
 
-  // ---- toggle the fused surface on/off ----
+  // ---- toggle the fused surface on/off, building it on first use ----
   useEffect(() => {
     showMeshRef.current = showMesh;
-    if (meshRef.current) meshRef.current.visible = showMesh;
-  }, [showMesh]);
+    if (meshRef.current) { meshRef.current.visible = showMesh; return; }
+    if (!showMesh || !work?.mesh_available || meshBusy) return;
+    // not built yet: this is the slow half of loading, so it happens here
+    // rather than on every project open
+    setMeshBusy(true);
+    fetch(`${BACKEND_URL}/api/raw/mesh`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ obp: work.obp }),
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(t('errMeshFailed')))))
+      .then((d) => renderMesh(d.mesh_url, true))
+      .catch((e) => alert(e.message || String(e)))
+      .finally(() => setMeshBusy(false));
+  }, [showMesh, work, meshBusy, renderMesh, t]);
 
   const loadProject = async (obp) => {
     setBusy(t('busyLoad'));
@@ -206,6 +239,7 @@ export default function RawEditor() {
       const data = await r.json();
       setWork(data);
       setVisLo(0); setVisHi(100); // start with the whole scan visible
+      setShowMesh(false);
       const haveMesh = await renderMesh(data.mesh_url);
       const buf = await (await fetch(`${BACKEND_URL}${data.cloud_url}`)).arrayBuffer();
       renderCloud(buf, haveMesh);
@@ -224,16 +258,45 @@ export default function RawEditor() {
     // them, so repeated cuts stay exact (no drift from earlier removals)
     const ranges = [...cuts.map((c) => [c.lo, c.hi]), [lo, hi]];
     try {
-      const r = await fetch(`${BACKEND_URL}/api/raw/cut`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ obp: work.obp, ranges }),
-      });
-      if (!r.ok) throw new Error(errText((await r.json().catch(() => ({}))).detail));
-      const data = await r.json();
+      // follow the cloud actually on screen, not a global capability flag:
+      // cutting in a different index space than the view is what made earlier
+      // cuts remove a different section than the one selected
+      const useSdk = work.cloud_source === 'sdk';
+      const data = useSdk
+        ? await runSdkCut(ranges)
+        : await postJson('/api/raw/cut', { obp: work.obp, ranges });
       // remember this section (for the grey overlay + the list); keep editing
-      setCuts((prev) => [...prev, { lo, hi, ...data }]);
+      setCuts((prev) => [...prev, { lo, hi, sdk: useSdk, ...data }]);
       setVisLo(0); setVisHi(100); // reset the window so the whole scan is visible again
     } catch (e) { alert(e.message || String(e)); } finally { setBusy(null); }
+  };
+
+  const postJson = async (path, body) => {
+    const r = await fetch(`${BACKEND_URL}${path}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(errText((await r.json().catch(() => ({}))).detail));
+    return r.json();
+  };
+
+  // The SDK re-fuses the mesh, which takes minutes on a full body scan, so the
+  // backend runs it as a job and we poll it for progress.
+  const runSdkCut = async (ranges) => {
+    const { job_id: jobId } = await postJson('/api/raw/cut_sdk',
+      { obp: work.obp, ranges, refuse });
+    for (;;) {
+      await new Promise((res) => setTimeout(res, 1000));
+      const r = await fetch(`${BACKEND_URL}/api/raw/cut_sdk/${jobId}`);
+      if (!r.ok) throw new Error(errText((await r.json().catch(() => ({}))).detail));
+      const st = await r.json();
+      if (st.state === 'error') throw new Error(st.error || t('errUnknown'));
+      if (st.state === 'done') return st.result;
+      // the backend sends a stage key so both languages stay translatable here
+      const key = st.stage ? `stage${st.stage[0].toUpperCase()}${st.stage.slice(1)}` : null;
+      const label = (key && t(key) !== key) ? t(key) : t('busyCut');
+      setBusy(`${label} — ${Math.round((st.progress || 0) * 100)}%`);
+    }
   };
 
   const startOver = () => {
@@ -278,13 +341,31 @@ export default function RawEditor() {
             <label className="switch-control" style={{ cursor: 'pointer', marginTop: '0.75rem' }}>
               <div className="switch-label">
                 <span className="switch-title">{t('modelSurface')}</span>
-                <span className="switch-desc">{t('modelSurfaceDesc')}</span>
+                <span className="switch-desc">
+                  {meshBusy ? t('meshLoading') : t('modelSurfaceDesc')}
+                </span>
               </div>
               <label className="switch">
-                <input type="checkbox" checked={showMesh} onChange={(e) => setShowMesh(e.target.checked)} />
+                <input type="checkbox" checked={showMesh}
+                  onChange={(e) => setShowMesh(e.target.checked)}
+                  disabled={meshBusy || work.mesh_available === false} />
                 <span className="slider-toggle"></span>
               </label>
             </label>
+
+            {work.cloud_source === 'sdk' && (
+              <label className="switch-control" style={{ cursor: 'pointer', marginTop: '0.75rem' }}>
+                <div className="switch-label">
+                  <span className="switch-title">⚡ {t('refuseLabel')}</span>
+                  <span className="switch-desc">{t('refuseDesc')}</span>
+                </div>
+                <label className="switch">
+                  <input type="checkbox" checked={refuse}
+                    onChange={(e) => setRefuse(e.target.checked)} disabled={!!busy} />
+                  <span className="slider-toggle"></span>
+                </label>
+              </label>
+            )}
 
             <button className="btn-primary" onClick={doCut} disabled={!!busy} style={{ marginTop: '1rem' }}>
               {busy ? t('inProgress') : t('cutButton')}
@@ -309,8 +390,17 @@ export default function RawEditor() {
                     total: (cuts[cuts.length - 1].total_points ?? 0).toLocaleString(),
                   })}
                 </p>
+                {/* the cut can succeed while the rebuild does not (running out
+                    of memory on a big scan); say so and fall back to the
+                    "fuse it yourself" instruction rather than claiming success */}
+                {cuts[cuts.length - 1].fuse_error && (
+                  <p style={{ fontSize: '0.8rem', color: 'var(--accent-amber, #f59e0b)', lineHeight: 1.5 }}>
+                    ⚠️ {t('cutNotFused', { reason: cuts[cuts.length - 1].fuse_error })}
+                  </p>
+                )}
                 <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                  {t('crealityHint', { name: cuts[cuts.length - 1].work_id })}
+                  {t(cuts[cuts.length - 1].fused ? 'crealityHintSdk' : 'crealityHint',
+                     { name: cuts[cuts.length - 1].work_id })}
                 </p>
                 <button className="btn-secondary" onClick={startOver} disabled={!!busy} style={{ marginTop: '0.5rem' }}>
                   {t('startOver')}

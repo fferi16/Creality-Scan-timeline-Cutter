@@ -7,17 +7,20 @@ The user then re-fuses the edited project in Creality Scan — which builds the
 mesh from those clouds, so the cut sections are gone.
 """
 import os
+import sys
 import glob as _glob
 import json
 import uuid
 import shutil
 import datetime
+import threading
 import subprocess
 
 import pymeshlab
 import trimesh
 
 from cleaner import MeshCleaner
+import obscan_sdk
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
@@ -38,6 +41,33 @@ CUT_SUFFIX = "_vagott"
 def _dir_size(path):
     return sum(os.path.getsize(os.path.join(r, f))
                for r, _, fs in os.walk(path) for f in fs)
+
+
+def _copy_project(src_dir, work_dir):
+    """Copy a project so the edit never touches the original.
+
+    Scans are gigabytes, so check there is room first and then check that
+    robocopy actually succeeded. Its exit code used to be ignored entirely: a
+    copy that ran out of disk left a half-written project that the cut then
+    edited and registered, handing the user a broken scan with no error."""
+    need = _dir_size(src_dir)
+    free = shutil.disk_usage(os.path.dirname(work_dir)).free
+    if free < need * 1.1:
+        raise HTTPException(
+            507, f"Nincs eleg hely a masolathoz: {need / 2**30:.1f} GB kellene, "
+                 f"{free / 2**30:.1f} GB szabad. Szabadits fel helyet, es probald ujra.")
+    result = subprocess.run(
+        ["robocopy", src_dir, work_dir, "/E", "/MT:16", "/J",
+         "/NFL", "/NDL", "/NJH", "/NJS", "/NP"],
+        capture_output=True,
+    )
+    # robocopy is not a normal exit-code citizen: 0-7 are success variants
+    # (files copied, extras present, ...), 8 and above are real failures.
+    if result.returncode >= 8:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise HTTPException(
+            500, f"A projekt masolasa nem sikerult (robocopy {result.returncode}). "
+                 "A felmasolt reszt eltavolitottam.")
 
 
 def _register_in_creality(work_dir):
@@ -81,6 +111,9 @@ def _is_creality_available():
 class LoadRequest(BaseModel):
     obp: str          # full path to the source project's project.obp
     reset: bool = False   # re-read even if cached
+    # Decimating a multi-million-face fused mesh takes a while and the viewer
+    # hides it by default, so it is only built when actually asked for.
+    with_mesh: bool = False
 
 
 class CutRequest(BaseModel):
@@ -93,6 +126,10 @@ class CutRequest(BaseModel):
     # instead of `ranges`. Accept it so a stale browser still cuts correctly.
     start_pct: float | None = None
     end_pct: float | None = None
+    # SDK path only: rebuild the mesh after cutting. Off means the cut project
+    # comes back with a stale mesh and the user fuses it in Creality Scan —
+    # much faster, and the only option on a machine short of memory.
+    refuse: bool = True
 
 
 @router.get("/available")
@@ -158,6 +195,26 @@ def _find_fused_mesh(work_dir):
         except Exception:
             continue
     return None
+
+
+def _find_sdk_cloud(proj_dir):
+    """The scan cloud the SDK works on, as written to disk (`result/model.ply`).
+
+    Verified identical, element for element, to what obscan_scan_get_raw_cloud
+    returns — so its index is a stable identity for a point, and the viewer can
+    draw the very array the cut addresses."""
+    hits = _glob.glob(os.path.join(proj_dir, "*", "result", "model.ply"))
+    return hits[0] if hits else None
+
+
+def _read_sdk_cloud_xyz(path):
+    """model.ply as packed float32 xyz in METRES (it is stored in mm), in file
+    order — that order is the timeline the slider runs on."""
+    import numpy as np
+    ms = pymeshlab.MeshSet()
+    ms.load_new_mesh(path)
+    v = (ms.current_mesh().vertex_matrix() / 1000.0).astype("float32")
+    return np.ascontiguousarray(v).tobytes()
 
 
 def _find_capture_cloud(proj_dir):
@@ -235,16 +292,50 @@ def load(req: LoadRequest):
     cloud_bin = os.path.join(PROCESSED_DIR, f"{name}_cloud.bin")
     mesh_glb = os.path.join(PROCESSED_DIR, f"{name}_mesh.glb")
 
-    # Fast path: already viewed this project — return the cached view instantly.
-    if not req.reset and os.path.exists(cloud_bin) and os.path.exists(mesh_glb):
+    # The surface overlay is off by default in the viewer and decimating a
+    # multi-million-face mesh is the slow part of loading, so it is only built
+    # when asked for — /mesh adds it later if the user switches it on.
+    def _reply(cached=False):
         return {
             "name": name, "obp": req.obp,
+            # which cloud the viewer is drawing: the cut MUST address the same
+            # one, or the slider and the deletion mean different things again
+            "cloud_source": "capture",
             "num_points": os.path.getsize(cloud_bin) // 12,
             "cloud_url": f"/static/processed/{name}_cloud.bin",
-            "mesh_url": f"/static/processed/{name}_mesh.glb",
-            "cached": True,
+            "mesh_url": (f"/static/processed/{name}_mesh.glb"
+                         if os.path.exists(mesh_glb) else None),
+            "mesh_available": _find_fused_mesh(src_dir) is not None,
+            "cached": cached,
         }
 
+    # A cached cloud is only usable if it came from the cloud we serve today.
+    # It carries no provenance, so compare its point count with the source's:
+    # an experiment that cached a different cloud once left the viewer showing
+    # voxel-ordered points while the code had already moved back to pc_after,
+    # and nothing revealed the mismatch.
+    def _cache_is_current():
+        src = _find_capture_cloud(src_dir)
+        if not src:
+            return False
+        try:
+            _, n_src, _, _ = _ply_parts(src)
+        except (OSError, ValueError, StopIteration):
+            return False
+        return os.path.getsize(cloud_bin) // 12 == n_src
+
+    if not req.reset and os.path.exists(cloud_bin) and _cache_is_current():
+        if req.with_mesh and not os.path.exists(mesh_glb):
+            try:
+                _export_mesh_glb(src_dir, mesh_glb)
+            except Exception:
+                pass
+        return _reply(cached=True)
+
+    # Only pc_after.ply carries scan time: it is written in capture order, so a
+    # point's place in the file is its place in time. The SDK's own cloud is
+    # ordered spatially (voxel traversal) — scrubbing it builds the model up in
+    # scattered patches, not along the scan — so it cannot back the timeline.
     ply = _find_capture_cloud(src_dir)
     if not ply:
         raise HTTPException(404, "Ebben a projektben nincs pc_after.ply (nyers, "
@@ -252,18 +343,33 @@ def load(req: LoadRequest):
     with open(cloud_bin, "wb") as f:
         f.write(_read_ply_xyz(ply))
 
-    mesh_url = None
-    try:
-        if _export_mesh_glb(src_dir, mesh_glb):  # reads the fused surface read-only
-            mesh_url = f"/static/processed/{name}_mesh.glb"
-    except Exception:
-        mesh_url = None  # mesh view is optional; points always work
-    return {
-        "name": name, "obp": req.obp,
-        "num_points": os.path.getsize(cloud_bin) // 12,
-        "cloud_url": f"/static/processed/{name}_cloud.bin",
-        "mesh_url": mesh_url,
-    }
+    if req.with_mesh:
+        try:
+            _export_mesh_glb(src_dir, mesh_glb)  # reads the fused surface read-only
+        except Exception:
+            pass  # mesh view is optional; points always work
+    return _reply()
+
+
+@router.post("/mesh")
+def mesh(req: LoadRequest):
+    """Build the surface overlay for a project already loaded without it. This
+    is the slow half of loading, so the viewer asks for it only when the user
+    turns the overlay on."""
+    if not os.path.isfile(req.obp):
+        raise HTTPException(404, "A projektfájl nem található.")
+    src_dir = os.path.dirname(req.obp)
+    name = os.path.basename(src_dir)
+    mesh_glb = os.path.join(PROCESSED_DIR, f"{name}_mesh.glb")
+    if not os.path.exists(mesh_glb):
+        try:
+            if not _export_mesh_glb(src_dir, mesh_glb):
+                raise HTTPException(404, "Ebben a projektben nincs fúzionált felület.")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(500, "A felület előkészítése nem sikerült.")
+    return {"mesh_url": f"/static/processed/{name}_mesh.glb"}
 
 
 def _ply_parts(path):
@@ -393,11 +499,7 @@ def cut(req: CutRequest):
 
     # make/refresh the copy (one-time full copy; then only the light PLYs change)
     if not os.path.isdir(work_dir):
-        subprocess.run(
-            ["robocopy", src_dir, work_dir, "/E", "/MT:16", "/J",
-             "/NFL", "/NDL", "/NJH", "/NJS", "/NP"],
-            capture_output=True,
-        )
+        _copy_project(src_dir, work_dir)
 
     # rewrite the copy's clouds from the ORIGINAL, minus the cut sections
     def _rel_in_copy(src_ply):
@@ -406,7 +508,19 @@ def cut(req: CutRequest):
 
     _cut_ply(src_after[0], _rel_in_copy(src_after[0]), mask)
     if src_before:
-        _cut_ply(src_before[0], _rel_in_copy(src_before[0]), mask)
+        # pc_before is NOT a positional twin of pc_after: it can hold a
+        # different number of points (75 801 vs 76 860 on one scan here) and a
+        # different order (points at the same index sit ~191 mm apart). Reusing
+        # pc_after's mask crashed outright; apply the same percentage range over
+        # pc_before's own count instead.
+        _, before_total, _, _ = _ply_parts(src_before[0])
+        before_mask = np.zeros(before_total, dtype=bool)
+        for s, e in valid_ranges:
+            a = max(0, min(before_total, int(round(s / 100.0 * before_total))))
+            b = max(0, min(before_total, int(round(e / 100.0 * before_total))))
+            if b > a:
+                before_mask[a:b] = True
+        _cut_ply(src_before[0], _rel_in_copy(src_before[0]), before_mask)
 
     # THE cut that fusion actually sees: Creality re-fuses from the RAW DEPTH
     # FRAMES inside resources.obscan, not from the pc_*.ply exports (proven by
@@ -495,3 +609,147 @@ def cut(req: CutRequest):
         "remaining_frames": frames_remaining,
         "total_frames": frames_total,
     }
+
+
+# ---------------------------------------------------------------------------
+# SDK path: let Creality's own SDK do the cut and rebuild the mesh, so the
+# edited project comes back finished instead of the user having to re-fuse it
+# by hand in Creality Scan.
+#
+# The SDK runs in a subprocess (see obscan_sdk) and re-fusing a full body scan
+# takes minutes, so this is a job with progress rather than one blocking call.
+# ---------------------------------------------------------------------------
+_JOBS = {}
+_JOBS_LOCK = threading.Lock()
+
+# stage -> where it starts on the overall bar, so the UI can show one honest
+# progress figure. The stage name is sent as-is and the frontend translates it —
+# the app is bilingual, so labels must not be baked in here.
+_STAGES = {
+    "copy":   0.00,
+    "open":   0.30,
+    "cloud":  0.35,
+    "match":  0.40,
+    "delete": 0.45,
+    "fuse":   0.50,
+}
+
+
+def _set(job_id, **kw):
+    with _JOBS_LOCK:
+        if job_id in _JOBS:
+            _JOBS[job_id].update(kw)
+
+
+def _overall(stage, progress):
+    base = _STAGES.get(stage, 0.5)
+    nxt = 1.0 if stage == "fuse" else min(
+        [s for s in _STAGES.values() if s > base] or [1.0])
+    return round(base + (nxt - base) * max(0.0, min(1.0, progress)), 4)
+
+
+def _run_sdk_cut(job_id, obp, ranges, do_refuse=True):
+    src_dir = os.path.dirname(obp)
+    name = os.path.basename(src_dir)
+    work_dir = _work_dir_for(name)
+    try:
+        # The SDK edit is written into the project, so repeated cuts would
+        # compound. Always start from a clean copy of the original — the
+        # frontend sends every range each time, so nothing is lost.
+        _set(job_id, stage="copy", progress=0.0)
+        if os.path.isdir(work_dir):
+            shutil.rmtree(work_dir, ignore_errors=True)
+        _copy_project(src_dir, work_dir)
+
+        work_obp = os.path.join(work_dir, os.path.basename(obp))
+
+        proc = subprocess.Popen(
+            [sys.executable, os.path.join(BASE_DIR, "obscan_sdk.py")],
+            cwd=BASE_DIR, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, bufsize=1,
+        )
+        proc.stdin.write(json.dumps({
+            "work_obp": work_obp, "ranges": ranges,
+            "log_dir": os.path.join(BASE_DIR, "sdk_logs"), "refuse": do_refuse,
+        }))
+        proc.stdin.close()
+
+        result = None
+        # the SDK writes its own chatter to stdout too, so take only the lines
+        # that parse as our JSON protocol and ignore the rest
+        for line in proc.stdout:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if "ok" in msg:
+                result = msg
+            elif "stage" in msg:
+                stage = msg["stage"]
+                _set(job_id, stage=stage,
+                     progress=_overall(stage, msg.get("progress", 0.0)))
+        proc.wait()
+
+        if not result or not result.get("ok"):
+            raise RuntimeError((result or {}).get("error")
+                               or "Az SDK-s vagas ismeretlen hibaval allt le.")
+
+        _register_in_creality(work_dir)
+        result.update(work_id=name + CUT_SUFFIX, work_dir=work_dir)
+        _set(job_id, state="done", stage="done", progress=1.0, result=result)
+    except Exception as exc:                       # noqa: BLE001 - surfaced to the UI
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        _set(job_id, state="error", error=detail)
+
+
+@router.get("/sdk_available")
+def sdk_available():
+    """Whether the SDK path can be used. False just means we fall back to the
+    manual cut — the tool works either way."""
+    return {"available": obscan_sdk.is_available()}
+
+
+@router.post("/cut_sdk")
+def cut_sdk(req: CutRequest):
+    """Start an SDK cut. Returns a job id to poll — re-fusing takes minutes."""
+    if not obscan_sdk.is_available():
+        raise HTTPException(400, "A Creality Scan SDK nem talalhato ezen a gepen.")
+    if not os.path.isfile(req.obp):
+        raise HTTPException(404, "A projektfajl nem talalhato.")
+    if not _find_sdk_cloud(os.path.dirname(req.obp)):
+        raise HTTPException(
+            400, "Ebben a projektben nincs model.ply, igy az SDK-s vagas nem "
+                 "cimezheto - hasznald a sima vagast.")
+    ranges = [[float(r[0]), float(r[1])] for r in req.ranges
+              if len(r) >= 2 and float(r[1]) > float(r[0])]
+    if not ranges and req.start_pct is not None and req.end_pct is not None:
+        ranges = [[req.start_pct, req.end_pct]]
+    if not ranges:
+        raise HTTPException(400, "Nem erkezett kijelolt szakasz.")
+
+    # One job per project: the copy is deleted and rebuilt at the start, so two
+    # cuts of the same scan would delete the directory out from under each other.
+    work_dir = _work_dir_for(os.path.basename(os.path.dirname(req.obp)))
+    job_id = str(uuid.uuid4())
+    with _JOBS_LOCK:
+        if any(j.get("state") == "running" and j.get("work_dir") == work_dir
+               for j in _JOBS.values()):
+            raise HTTPException(409, "Ezen a projekten mar fut egy vagas.")
+        _JOBS[job_id] = {"state": "running", "stage": "copy", "progress": 0.0,
+                         "work_dir": work_dir}
+    threading.Thread(target=_run_sdk_cut,
+                     args=(job_id, req.obp, ranges, req.refuse),
+                     daemon=True).start()
+    return {"job_id": job_id}
+
+
+@router.get("/cut_sdk/{job_id}")
+def cut_sdk_status(job_id: str):
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(404, "Ismeretlen feladat.")
+        return dict(job)

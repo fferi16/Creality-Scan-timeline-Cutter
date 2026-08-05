@@ -32,6 +32,27 @@ const translations = {
     keepInfo: '{remaining} / {total} points kept',
     crealityHint:
       'Open the {name} project in Creality Scan and run the fusion — it rebuilds without the removed sections.',
+    // SDK path: the mesh is already rebuilt, so there is nothing left to do
+    crealityHintSdk:
+      'The {name} project is ready — already re-fused without the removed sections. Open it in Creality Scan to check it.',
+    sdkBadge: 'Rebuilt automatically',
+    sdkBadgeDesc:
+      "Creality Scan's own engine does the cut and rebuilds the mesh, so you don't have to re-fuse by hand.",
+    // job stages reported by the backend (it sends the key, not the wording)
+    stageCopy: 'Copying the project',
+    stageOpen: 'Opening the project',
+    stageCloud: 'Reading the point cloud',
+    stageMatch: 'Matching the time range',
+    stageDelete: 'Removing points',
+    stageFuse: 'Rebuilding the mesh',
+    stageDone: 'Done',
+    refuseLabel: 'Rebuild the mesh after cutting',
+    refuseDesc:
+      'Takes minutes on a full body scan and needs a lot of memory. Off is much faster — the cut is the same either way, you just fuse it in Creality Scan yourself.',
+    meshLoading: 'Preparing the surface…',
+    errMeshFailed: 'The surface could not be prepared.',
+    cutNotFused:
+      'The mesh was not rebuilt — the cut itself is done. Reason: {reason}',
 
     placeholderTitle: 'Choose a scanned project',
     placeholderDesc:
@@ -78,6 +99,27 @@ const translations = {
     keepInfo: '{remaining} / {total} pont maradt',
     crealityHint:
       'Nyisd meg a {name} projektet a Creality Scanben, és futtasd le a fúziót — a kivágott szakaszok nélkül áll össze.',
+    // SDK-út: a mesh már újraépült, nincs teendő
+    crealityHintSdk:
+      'A {name} projekt kész — a kivágott szakaszok nélkül már újra is fuzionált. Nyisd meg a Creality Scanben, ha meg akarod nézni.',
+    sdkBadge: 'Automatikus újraépítés',
+    sdkBadgeDesc:
+      'A Creality Scan saját motorja végzi a vágást és építi újra a mesh-t, így nem kell kézzel fuzionálnod.',
+    // a backend a stádium kulcsát küldi, a szöveg itt van
+    stageCopy: 'Projekt másolása',
+    stageOpen: 'Projekt megnyitása',
+    stageCloud: 'Pontfelhő beolvasása',
+    stageMatch: 'Idősáv illesztése',
+    stageDelete: 'Pontok törlése',
+    stageFuse: 'Mesh újraépítése',
+    stageDone: 'Kész',
+    refuseLabel: 'Mesh újraépítése vágás után',
+    refuseDesc:
+      'Teljes alakos szkennél percekbe telik és sok memóriát igényel. Kikapcsolva sokkal gyorsabb — a vágás ugyanaz, csak a fúziót te futtatod a Creality Scanben.',
+    meshLoading: 'Felület előkészítése…',
+    errMeshFailed: 'A felületet nem sikerült előkészíteni.',
+    cutNotFused:
+      'A mesh nem épült újra — maga a vágás megvan. Ok: {reason}',
 
     placeholderTitle: 'Válassz egy szkennelt projektet',
     placeholderDesc:
