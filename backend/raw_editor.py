@@ -116,12 +116,21 @@ class LoadRequest(BaseModel):
     with_mesh: bool = False
 
 
+class FramesRequest(BaseModel):
+    obp: str
+    reset: bool = False     # rebuild even if a cached frame cloud exists
+
+
 class CutRequest(BaseModel):
     obp: str            # the ORIGINAL project's project.obp (copied on cut)
     # Every cut section, as [start_pct, end_pct] over the ORIGINAL point cloud
     # (the slider works in point/time order). The copy is always rebuilt from the
     # original minus the union of these, so repeated cuts never drift.
     ranges: list = []
+    # Exact frame numbers to delete, when the view is the frame timeline. With
+    # these the cut needs no percentage->frame guesswork at all: the frames the
+    # user saw disappear are the frames that go.
+    frames: list = []
     # Backwards-compat: an older cached frontend sends a single interval this way
     # instead of `ranges`. Accept it so a stale browser still cuts correctly.
     start_pct: float | None = None
@@ -179,7 +188,12 @@ def _find_fused_mesh(work_dir):
     vary, so prefer the clean meshed surface (Mesh.ply) — it's already display
     sized (~1M faces) and aligns with the cloud — over the raw Fused.ply, which
     can be 8M+ faces and murder-slow to decimate. Fall back to whatever has
-    faces (some result files, e.g. model.ply, are empty)."""
+    faces (some result files, e.g. model.ply, are empty).
+
+    Only the PLY HEADER is read to decide. Loading each candidate with pymeshlab
+    just to call face_number() meant parsing multi-million-face meshes on every
+    project open — half a second or more spent answering a yes/no question about
+    a surface the viewer hides by default."""
     candidates = _glob.glob(os.path.join(work_dir, "*", "result", "*.ply"))
 
     def rank(p):
@@ -187,14 +201,32 @@ def _find_fused_mesh(work_dir):
         return 0 if b == "mesh.ply" else 1 if b == "model.ply" else 2
 
     for ply in sorted(candidates, key=rank):
-        try:
-            ms = pymeshlab.MeshSet()
-            ms.load_new_mesh(ply)
-            if ms.current_mesh().face_number() > 0:
-                return ply
-        except Exception:
-            continue
+        if _ply_face_count(ply) > 0:
+            return ply
     return None
+
+
+def _ply_face_count(path):
+    """Faces declared in a PLY header, or 0 if it has none / cannot be read."""
+    try:
+        with open(path, "rb") as f:
+            header = b""
+            while b"end_header" not in header:
+                chunk = f.read(4096)
+                if not chunk:
+                    return 0
+                header += chunk
+                if len(header) > 1 << 16:      # not a PLY header we understand
+                    return 0
+    except OSError:
+        return 0
+    for line in header.split(b"\n"):
+        if line.startswith(b"element face"):
+            try:
+                return int(line.split()[2])
+            except (IndexError, ValueError):
+                return 0
+    return 0
 
 
 def _find_sdk_cloud(proj_dir):
@@ -215,6 +247,20 @@ def _read_sdk_cloud_xyz(path):
     ms.load_new_mesh(path)
     v = (ms.current_mesh().vertex_matrix() / 1000.0).astype("float32")
     return np.ascontiguousarray(v).tobytes()
+
+
+def _session_dir(proj_dir):
+    """The session subfolder that holds the scan itself (resources.obscan)."""
+    hits = _glob.glob(os.path.join(proj_dir, "*", "resources.obscan"))
+    return os.path.dirname(hits[0]) if hits else None
+
+
+def _frames_available(proj_dir):
+    """Whether this project can be shown as a frame timeline. Needs the frames
+    themselves and the installed library that decodes them — without it the
+    viewer falls back to the pc_after cloud, which is still a real timeline,
+    only a coarser one."""
+    return bool(_session_dir(proj_dir)) and obscan_sdk.is_available()
 
 
 def _find_capture_cloud(proj_dir):
@@ -280,62 +326,30 @@ def _export_mesh_glb(work_dir, out_glb):
     return True
 
 
-@router.post("/load")
-def load(req: LoadRequest):
-    """View a project's scan in ACQUISITION (time) order. Reads pc_after.ply
-    directly — a plain PLY the scanner writes in capture order — so no SDK, no
-    scanner and no copy are needed, and the original is only ever read."""
-    if not os.path.isfile(req.obp):
-        raise HTTPException(404, "A projektfájl nem található.")
-    src_dir = os.path.dirname(req.obp)
-    name = os.path.basename(src_dir)
-    cloud_bin = os.path.join(PROCESSED_DIR, f"{name}_cloud.bin")
-    mesh_glb = os.path.join(PROCESSED_DIR, f"{name}_mesh.glb")
+def _capture_cache_current(src_dir, cloud_bin):
+    """Whether the cached pc_after cloud came from the cloud we serve today.
 
-    # The surface overlay is off by default in the viewer and decimating a
-    # multi-million-face mesh is the slow part of loading, so it is only built
-    # when asked for — /mesh adds it later if the user switches it on.
-    def _reply(cached=False):
-        return {
-            "name": name, "obp": req.obp,
-            # which cloud the viewer is drawing: the cut MUST address the same
-            # one, or the slider and the deletion mean different things again
-            "cloud_source": "capture",
-            "num_points": os.path.getsize(cloud_bin) // 12,
-            "cloud_url": f"/static/processed/{name}_cloud.bin",
-            "mesh_url": (f"/static/processed/{name}_mesh.glb"
-                         if os.path.exists(mesh_glb) else None),
-            "mesh_available": _find_fused_mesh(src_dir) is not None,
-            "cached": cached,
-        }
+    It carries no provenance, so compare its point count with the source's: an
+    experiment that cached a different cloud once left the viewer showing
+    voxel-ordered points while the code had already moved back to pc_after, and
+    nothing revealed the mismatch."""
+    if not os.path.exists(cloud_bin):
+        return False
+    src = _find_capture_cloud(src_dir)
+    if not src:
+        return False
+    try:
+        _, n_src, _, _ = _ply_parts(src)
+    except (OSError, ValueError, StopIteration):
+        return False
+    return os.path.getsize(cloud_bin) // 12 == n_src
 
-    # A cached cloud is only usable if it came from the cloud we serve today.
-    # It carries no provenance, so compare its point count with the source's:
-    # an experiment that cached a different cloud once left the viewer showing
-    # voxel-ordered points while the code had already moved back to pc_after,
-    # and nothing revealed the mismatch.
-    def _cache_is_current():
-        src = _find_capture_cloud(src_dir)
-        if not src:
-            return False
-        try:
-            _, n_src, _, _ = _ply_parts(src)
-        except (OSError, ValueError, StopIteration):
-            return False
-        return os.path.getsize(cloud_bin) // 12 == n_src
 
-    if not req.reset and os.path.exists(cloud_bin) and _cache_is_current():
-        if req.with_mesh and not os.path.exists(mesh_glb):
-            try:
-                _export_mesh_glb(src_dir, mesh_glb)
-            except Exception:
-                pass
-        return _reply(cached=True)
-
-    # Only pc_after.ply carries scan time: it is written in capture order, so a
-    # point's place in the file is its place in time. The SDK's own cloud is
-    # ordered spatially (voxel traversal) — scrubbing it builds the model up in
-    # scattered patches, not along the scan — so it cannot back the timeline.
+def _build_capture_cloud(src_dir, cloud_bin):
+    """Cache pc_after.ply as packed xyz. Only pc_after carries scan time: it is
+    written in capture order, so a point's place in the file is its place in
+    time. The SDK's own cloud is ordered spatially (voxel traversal) — scrubbing
+    it builds the model up in scattered patches — so it cannot back a timeline."""
     ply = _find_capture_cloud(src_dir)
     if not ply:
         raise HTTPException(404, "Ebben a projektben nincs pc_after.ply (nyers, "
@@ -343,12 +357,72 @@ def load(req: LoadRequest):
     with open(cloud_bin, "wb") as f:
         f.write(_read_ply_xyz(ply))
 
-    if req.with_mesh:
+
+@router.post("/load")
+def load(req: LoadRequest):
+    """Open a project: report what it can be viewed as, and build nothing that
+    is not going to be looked at.
+
+    Both heavy parts are on demand. The surface overlay is off by default, so
+    /mesh builds it when the user switches it on. The pc_after cloud is only the
+    fallback timeline when the frames cannot be read, so /cloud builds it if it
+    is actually needed — reading it for a full body scan costs a couple of
+    seconds that the frame timeline would then throw away."""
+    if not os.path.isfile(req.obp):
+        raise HTTPException(404, "A projektfájl nem található.")
+    src_dir = os.path.dirname(req.obp)
+    name = os.path.basename(src_dir)
+    cloud_bin = os.path.join(PROCESSED_DIR, f"{name}_cloud.bin")
+    mesh_glb = os.path.join(PROCESSED_DIR, f"{name}_mesh.glb")
+
+    frames_ok = _frames_available(src_dir)
+    have_cloud = not req.reset and _capture_cache_current(src_dir, cloud_bin)
+    # Without the frame timeline the pc_after cloud IS the view, so build it now
+    # rather than making the viewer ask for what it is certain to need.
+    if not frames_ok and not have_cloud:
+        _build_capture_cloud(src_dir, cloud_bin)
+        have_cloud = True
+
+    if req.with_mesh and not os.path.exists(mesh_glb):
         try:
             _export_mesh_glb(src_dir, mesh_glb)  # reads the fused surface read-only
         except Exception:
             pass  # mesh view is optional; points always work
-    return _reply()
+
+    return {
+        "name": name, "obp": req.obp,
+        # which cloud the viewer is drawing: the cut MUST address the same one,
+        # or the slider and the deletion mean different things again
+        "cloud_source": "capture",
+        "num_points": os.path.getsize(cloud_bin) // 12 if have_cloud else None,
+        # None means "not built" — ask /cloud for it
+        "cloud_url": f"/static/processed/{name}_cloud.bin" if have_cloud else None,
+        "mesh_url": (f"/static/processed/{name}_mesh.glb"
+                     if os.path.exists(mesh_glb) else None),
+        "mesh_available": _find_fused_mesh(src_dir) is not None,
+        # the exact timeline is a separate, slower load (/frames); telling the
+        # viewer up front lets it go straight for it
+        "frames_available": frames_ok,
+        "cached": have_cloud,
+    }
+
+
+@router.post("/cloud")
+def cloud(req: LoadRequest):
+    """Build (or return) the pc_after fallback cloud. The viewer asks for this
+    only when the frame timeline is unavailable or failed."""
+    if not os.path.isfile(req.obp):
+        raise HTTPException(404, "A projektfájl nem található.")
+    src_dir = os.path.dirname(req.obp)
+    name = os.path.basename(src_dir)
+    cloud_bin = os.path.join(PROCESSED_DIR, f"{name}_cloud.bin")
+    if req.reset or not _capture_cache_current(src_dir, cloud_bin):
+        _build_capture_cloud(src_dir, cloud_bin)
+    return {
+        "cloud_source": "capture",
+        "cloud_url": f"/static/processed/{name}_cloud.bin",
+        "num_points": os.path.getsize(cloud_bin) // 12,
+    }
 
 
 @router.post("/mesh")
@@ -370,6 +444,173 @@ def mesh(req: LoadRequest):
         except Exception:
             raise HTTPException(500, "A felület előkészítése nem sikerült.")
     return {"mesh_url": f"/static/processed/{name}_mesh.glb"}
+
+
+# ---------------------------------------------------------------------------
+# The exact timeline: the scan rebuilt from its own depth frames.
+#
+# Every frame is one instant and carries its own pose, so placing them in a
+# common coordinate system gives a cloud whose points are grouped BY FRAME in
+# scan order. A slider position then names actual frames — and those frames are
+# what the cut deletes, so what the user sees disappear is what disappears.
+#
+# Decoding a full body scan takes ~30 s, so this is a job with progress, and the
+# result is cached next to the project's other derived files.
+# ---------------------------------------------------------------------------
+_JOBS = {}
+_JOBS_LOCK = threading.Lock()
+
+# How many points the frame cloud may hold in total, shared equally between the
+# frames. It costs no decoding time (measured: 3M, 8M and 20M all take ~30 s on
+# a 2401-frame scan) — only file size and browser memory.
+FRAME_POINT_BUDGET = 20_000_000
+
+
+def _set(job_id, **kw):
+    with _JOBS_LOCK:
+        if job_id in _JOBS:
+            _JOBS[job_id].update(kw)
+
+
+def _frames_paths(name):
+    return (os.path.join(PROCESSED_DIR, f"{name}_frames.bin"),
+            os.path.join(PROCESSED_DIR, f"{name}_frames.json"))
+
+
+def _frames_cached(name, session_dir):
+    """The cached frame cloud, if it was built from the scan as it is now.
+
+    The manifest records the source obscan's size and mtime: a cache with no
+    provenance is how the viewer once ended up drawing one cloud while the cut
+    addressed another."""
+    cloud_bin, manifest_json = _frames_paths(name)
+    if not (os.path.exists(cloud_bin) and os.path.exists(manifest_json)):
+        return None
+    try:
+        with open(manifest_json, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        st = os.stat(os.path.join(session_dir, "resources.obscan"))
+    except (OSError, ValueError):
+        return None
+    if data.get("source_size") != st.st_size or data.get("source_mtime") != int(st.st_mtime):
+        return None
+    # a cloud built to a different point budget is stale even if the scan is not
+    if data.get("max_points") != FRAME_POINT_BUDGET:
+        return None
+    if os.path.getsize(cloud_bin) // 12 != data.get("num_points"):
+        return None
+    return data
+
+
+def _frames_reply(name, data):
+    return {
+        "name": name,
+        "cloud_source": "frames",
+        "cloud_url": f"/static/processed/{name}_frames.bin",
+        "frames": data["frames"],            # [[frame number, point count], ...]
+        "num_frames": data["num_frames"],
+        "num_points": data["num_points"],
+        "total_frames": data.get("total_frames"),
+        # frames the registration gave up on: not on the timeline, and the
+        # fusion skips them too
+        "no_pose_frames": data.get("no_pose_frames"),
+        # on the timeline but with nothing to draw — still cut with their section
+        "blank_frames": data.get("blank_frames"),
+    }
+
+
+def _run_frames(job_id, obp):
+    src_dir = os.path.dirname(obp)
+    name = os.path.basename(src_dir)
+    session_dir = _session_dir(src_dir)
+    cloud_bin, manifest_json = _frames_paths(name)
+    try:
+        _set(job_id, stage="open", progress=0.0)
+        proc = subprocess.Popen(
+            [sys.executable, os.path.join(BASE_DIR, "frame_reader.py")],
+            cwd=BASE_DIR, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, bufsize=1,
+        )
+        proc.stdin.write(json.dumps({
+            "session_dir": session_dir, "out_bin": cloud_bin,
+            "log_dir": os.path.join(BASE_DIR, "sdk_logs"),
+            "max_points": FRAME_POINT_BUDGET,
+        }))
+        proc.stdin.close()
+
+        result = None
+        # the library prints its own chatter to stdout as well, so keep only the
+        # lines that parse as our protocol
+        for line in proc.stdout:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if "ok" in msg:
+                result = msg
+            elif "stage" in msg:
+                # decoding is all of the wait; give it the whole bar
+                _set(job_id, stage=msg["stage"],
+                     progress=round(0.02 + 0.98 * msg.get("progress", 0.0), 4))
+        proc.wait()
+
+        if not result or not result.get("ok"):
+            raise RuntimeError((result or {}).get("error")
+                               or "A képkockák beolvasása ismeretlen hibával állt le.")
+
+        st = os.stat(os.path.join(session_dir, "resources.obscan"))
+        result["source_size"] = st.st_size
+        result["source_mtime"] = int(st.st_mtime)
+        with open(manifest_json, "w", encoding="utf-8") as f:
+            json.dump(result, f)
+        _set(job_id, state="done", stage="done", progress=1.0,
+             result=_frames_reply(name, result))
+    except Exception as exc:                       # noqa: BLE001 - surfaced to the UI
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        _set(job_id, state="error", error=detail)
+
+
+@router.post("/frames")
+def frames(req: FramesRequest):
+    """Load the frame timeline. Returns the finished result straight away when
+    it is cached, otherwise a job id to poll."""
+    if not os.path.isfile(req.obp):
+        raise HTTPException(404, "A projektfájl nem található.")
+    src_dir = os.path.dirname(req.obp)
+    name = os.path.basename(src_dir)
+    session_dir = _session_dir(src_dir)
+    if not session_dir:
+        raise HTTPException(404, "Ebben a projektben nincs resources.obscan.")
+    if not obscan_sdk.is_available():
+        raise HTTPException(400, "A Creality Scan nincs telepítve, így a "
+                                 "képkockák nem dekódolhatók.")
+
+    if not req.reset:
+        cached = _frames_cached(name, session_dir)
+        if cached:
+            return {"ready": True, **_frames_reply(name, cached)}
+
+    job_id = str(uuid.uuid4())
+    with _JOBS_LOCK:
+        if any(j.get("state") == "running" and j.get("frames_for") == name
+               for j in _JOBS.values()):
+            raise HTTPException(409, "Ezt a projektet már olvassa egy másik betöltés.")
+        _JOBS[job_id] = {"state": "running", "stage": "open", "progress": 0.0,
+                         "frames_for": name}
+    threading.Thread(target=_run_frames, args=(job_id, req.obp), daemon=True).start()
+    return {"ready": False, "job_id": job_id}
+
+
+@router.get("/frames/{job_id}")
+def frames_status(job_id: str):
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(404, "Ismeretlen feladat.")
+        return dict(job)
 
 
 def _ply_parts(path):
@@ -444,13 +685,19 @@ def _cut_ply(src, dst, remove_mask):
 
 @router.post("/cut")
 def cut(req: CutRequest):
-    """Remove the selected time sections directly from the project's point clouds
-    (pc_after.ply + pc_before.ply) in a copy, then let the user re-fuse in
-    Creality Scan. Creality fuses the mesh from these registered clouds, NOT from
-    the raw depth frames, so editing the clouds is what actually drops a section.
-    The clouds are in capture (time) order, so a point's index is its position in
-    scan time and the slider selection maps to it 1:1. The copy is always rebuilt
-    from the original minus the union of `ranges`, so repeated cuts never drift."""
+    """Remove the selected time sections from a copy of the project, then let the
+    user re-fuse in Creality Scan.
+
+    What fusion actually reads is the raw depth frames in resources.obscan, so
+    deleting frames is what drops a section — proven by feeding fusion a
+    5%-point cloud and still getting a full body back. The registered clouds
+    (pc_after.ply + pc_before.ply) are cut alongside them so the project stays
+    self-consistent.
+
+    The frame view sends the frame numbers it displayed, and those exact frames
+    go. The older cloud view only has percentages, which are mapped onto the
+    frame list by position. Either way the copy is rebuilt from the original
+    minus the whole selection, so repeated cuts never drift."""
     import numpy as np
     if not os.path.isfile(req.obp):
         raise HTTPException(404, "A projektfájl nem található.")
@@ -459,43 +706,59 @@ def cut(req: CutRequest):
     work_dir = _work_dir_for(name)
     work_id = name + CUT_SUFFIX
 
+    doomed_frames = sorted({int(x) for x in req.frames})
+
     # the clouds Creality fuses from (same session subfolder, same point order)
     src_after = _glob.glob(os.path.join(src_dir, "*", "pc_after.ply"))
     src_before = _glob.glob(os.path.join(src_dir, "*", "pc_before.ply"))
-    if not src_after:
+    src_obscan = _glob.glob(os.path.join(src_dir, "*", "resources.obscan"))
+    if not src_after and not doomed_frames:
         raise HTTPException(400, "Ebben a projektben nincs pc_after.ply pontfelhő.")
 
-    _, total_points, _, _ = _ply_parts(src_after[0])
+    # a frame selection is checked against the frames actually in the scan, so a
+    # request that would empty the project is refused before anything is copied
+    if doomed_frames:
+        if not src_obscan:
+            raise HTTPException(400, "Ebben a projektben nincs resources.obscan.")
+        if len(doomed_frames) >= len(_frame_axis(src_obscan[0])):
+            raise HTTPException(400, "A teljes szken ki lenne vágva — szűkítsd a kijelölést.")
+
+    total_points = 0
+    mask = None
     # accept both the new `ranges` list and a legacy single start/end interval
     ranges = list(req.ranges)
     if not ranges and req.start_pct is not None and req.end_pct is not None:
         ranges = [[req.start_pct, req.end_pct]]
-    mask = np.zeros(total_points, dtype=bool)
     # keep the ranges that actually select something — the frame cut below must
     # use exactly these, or a malformed entry would be skipped here and still
     # blow up (or delete frames) there.
     valid_ranges = []
-    for r in ranges:
-        try:
-            s, e = float(r[0]), float(r[1])
-        except (TypeError, ValueError, IndexError):
-            continue
-        a = max(0, min(total_points, int(round(s / 100.0 * total_points))))
-        b = max(0, min(total_points, int(round(e / 100.0 * total_points))))
-        if b > a:
-            mask[a:b] = True
-            valid_ranges.append((s, e))
-    removed = int(mask.sum())
-    if removed == 0:
-        # No points selected — almost always a stale frontend that didn't send
-        # the cut range. Fail loudly instead of silently writing a full copy.
-        raise HTTPException(
-            400,
-            "A vágás 0 pontot távolítana el (nem érkezett kijelölés). Zárd be "
-            "teljesen a programot ÉS a böngészőt, majd indítsd újra, hogy a "
-            "javított verzió töltődjön be.")
-    if removed >= total_points:
-        raise HTTPException(400, "A teljes szken ki lenne vágva — szűkítsd a kijelölést.")
+    if src_after:
+        _, total_points, _, _ = _ply_parts(src_after[0])
+        mask = np.zeros(total_points, dtype=bool)
+        for r in ranges:
+            try:
+                s, e = float(r[0]), float(r[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            a = max(0, min(total_points, int(round(s / 100.0 * total_points))))
+            b = max(0, min(total_points, int(round(e / 100.0 * total_points))))
+            if b > a:
+                mask[a:b] = True
+                valid_ranges.append((s, e))
+    removed = int(mask.sum()) if mask is not None else 0
+    if not doomed_frames:
+        if removed == 0:
+            # No points selected — almost always a stale frontend that didn't
+            # send the cut range. Fail loudly instead of silently writing a full
+            # copy.
+            raise HTTPException(
+                400,
+                "A vágás 0 pontot távolítana el (nem érkezett kijelölés). Zárd be "
+                "teljesen a programot ÉS a böngészőt, majd indítsd újra, hogy a "
+                "javított verzió töltődjön be.")
+        if removed >= total_points:
+            raise HTTPException(400, "A teljes szken ki lenne vágva — szűkítsd a kijelölést.")
 
     # make/refresh the copy (one-time full copy; then only the light PLYs change)
     if not os.path.isdir(work_dir):
@@ -506,8 +769,9 @@ def cut(req: CutRequest):
         rel = os.path.relpath(src_ply, src_dir)
         return os.path.join(work_dir, rel)
 
-    _cut_ply(src_after[0], _rel_in_copy(src_after[0]), mask)
-    if src_before:
+    if src_after and mask is not None and mask.any():
+        _cut_ply(src_after[0], _rel_in_copy(src_after[0]), mask)
+    if src_before and valid_ranges:
         # pc_before is NOT a positional twin of pc_after: it can hold a
         # different number of points (75 801 vs 76 860 on one scan here) and a
         # different order (points at the same index sit ~191 mm apart). Reusing
@@ -529,7 +793,6 @@ def cut(req: CutRequest):
     # copy's obscan is refreshed from the original first, so repeated cuts are
     # always applied to a clean base and never drift.
     frames_deleted = frames_remaining = frames_total = None
-    src_obscan = _glob.glob(os.path.join(src_dir, "*", "resources.obscan"))
     if src_obscan:
         import re as _re
         import sqlite3
@@ -551,25 +814,39 @@ def cut(req: CutRequest):
         axis = _frame_axis(dst_obscan)
         if axis:
             frames_total = len(axis)
-            # closed frame-NUMBER windows, derived from list positions. Frame
-            # numbers are not contiguous (dropped frames leave gaps), but they
-            # are ordered, so a number window still selects a contiguous run in
-            # scan time — and the colour (c~) frames share this numbering, so
-            # the same window picks up their matching frames too.
+            # The frame timeline sends the exact frame numbers it showed the
+            # user, so nothing has to be inferred. Deleting precisely those is
+            # also why frames the registration gave up on stay: they are not on
+            # the timeline, and the fusion skips them anyway.
+            doomed = set(doomed_frames)
+            # Without it (the pc_after fallback view) the selection is still a
+            # percentage, mapped to closed frame-NUMBER windows via list
+            # positions. Frame numbers are not contiguous — dropped frames leave
+            # gaps — but they are ordered, so a number window still selects a
+            # contiguous run of scan time.
             windows = []
-            for s, e in valid_ranges:
-                a = _pct_to_index(axis, s)
-                b = _pct_to_index(axis, e)
-                if b > a:
-                    windows.append((axis[a][0], axis[b - 1][0]))
+            if not doomed:
+                for s, e in valid_ranges:
+                    a = _pct_to_index(axis, s)
+                    b = _pct_to_index(axis, e)
+                    if b > a:
+                        windows.append((axis[a][0], axis[b - 1][0]))
+
+            def _is_doomed(num):
+                if doomed:
+                    return num in doomed
+                return any(lo <= num <= hi for lo, hi in windows)
+
             con = sqlite3.connect(dst_obscan)
             try:
                 cur = con.cursor()
                 frames_deleted = 0
                 for (nm,) in con.execute(
                         "SELECT name FROM files WHERE name LIKE 'd~%' OR name LIKE 'c~%'").fetchall():
+                    # colour frames share the depth frames' numbering, so the
+                    # same selection picks up their matching frames too
                     m = _re.match(r"[dc]~0*(\d+)", nm)
-                    if m and any(lo <= int(m.group(1)) <= hi for lo, hi in windows):
+                    if m and _is_doomed(int(m.group(1))):
                         cur.execute("DELETE FROM files WHERE name=?", (nm,))
                         if nm.startswith("d~"):
                             frames_deleted += 1
@@ -591,6 +868,14 @@ def cut(req: CutRequest):
                 except (OSError, ValueError):
                     pass
 
+    # A frame selection that matches nothing means the view and the project have
+    # drifted apart (a stale timeline after an earlier cut, say). Say so instead
+    # of handing back a copy that is identical to the original.
+    if doomed_frames and not frames_deleted:
+        raise HTTPException(
+            409, "A kijelölt képkockák nem találhatók a projektben. Töltsd be "
+                 "újra a projektet, és vágj újra.")
+
     # drop the fusion working cache so Creality rebuilds instead of reusing it
     for cache in _glob.glob(os.path.join(work_dir, "*", "temp", "*.obmc")):
         try:
@@ -602,6 +887,9 @@ def cut(req: CutRequest):
     return {
         "work_id": work_id,
         "work_dir": work_dir,
+        # which selection actually drove the deletion — the frame view addresses
+        # frames directly, the older cloud view goes through percentages
+        "cut_by": "frames" if doomed_frames else "range",
         "removed_points": removed,
         "remaining_points": total_points - removed,
         "total_points": total_points,
@@ -619,9 +907,6 @@ def cut(req: CutRequest):
 # The SDK runs in a subprocess (see obscan_sdk) and re-fusing a full body scan
 # takes minutes, so this is a job with progress rather than one blocking call.
 # ---------------------------------------------------------------------------
-_JOBS = {}
-_JOBS_LOCK = threading.Lock()
-
 # stage -> where it starts on the overall bar, so the UI can show one honest
 # progress figure. The stage name is sent as-is and the frontend translates it —
 # the app is bilingual, so labels must not be baked in here.
@@ -633,12 +918,6 @@ _STAGES = {
     "delete": 0.45,
     "fuse":   0.50,
 }
-
-
-def _set(job_id, **kw):
-    with _JOBS_LOCK:
-        if job_id in _JOBS:
-            _JOBS[job_id].update(kw)
 
 
 def _overall(stage, progress):

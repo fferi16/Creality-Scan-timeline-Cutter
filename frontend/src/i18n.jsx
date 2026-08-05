@@ -60,11 +60,24 @@ const translations = {
 
     busyLoad: 'Copying and loading the project…',
     busyCut: 'Removing points and saving to the Creality project…',
+    busyFrames: 'Decoding the frames',
+    stageFrames: 'Decoding the frames',
 
     timelineHead: 'Scan time — only the visible section is shown',
     scanStart: 'Scan start',
     scanEnd: 'Scan end',
     pointsShown: '{shown} / {total} points shown',
+    framesShown: '{shown} / {total} frames shown',
+    frames: 'Frames',
+    frameTimeline: 'Frame-exact timeline',
+    frameTimelineDesc:
+      'The slider selects whole frames, and the cut removes exactly those — what disappears from the view is what disappears from the scan.',
+    frameFallback:
+      'The frames could not be read ({reason}), so the timeline is the registered cloud: the cut is still by time, only its edges are approximate.',
+    frameBlank:
+      '{count} frames have nothing to draw (their image would not decode). They stay on the timeline and are cut with their section.',
+    cutRowFrames: '{from}–{to}% · {frames} frames',
+    keepInfoFrames: '{remaining} / {total} frames kept',
 
     errWholeScan:
       'Narrow the slider to the section to remove — right now the whole scan would be cut.',
@@ -127,11 +140,24 @@ const translations = {
 
     busyLoad: 'Projekt másolása és betöltése…',
     busyCut: 'Pontok törlése és mentés a Creality projektbe…',
+    busyFrames: 'Képkockák dekódolása',
+    stageFrames: 'Képkockák dekódolása',
 
     timelineHead: 'Szkennelési idő — csak a látható szakasz jelenik meg',
     scanStart: 'Szken eleje',
     scanEnd: 'Szken vége',
     pointsShown: '{shown} / {total} pont látszik',
+    framesShown: '{shown} / {total} képkocka látszik',
+    frames: 'Képkockák',
+    frameTimeline: 'Képkocka-pontos idővonal',
+    frameTimelineDesc:
+      'A csúszka egész képkockákat jelöl ki, és pontosan azokat törli a vágás — ami eltűnik a nézetből, az tűnik el a szkenből.',
+    frameFallback:
+      'A képkockákat nem sikerült beolvasni ({reason}), így az idővonal a regisztrált pontfelhő: a vágás továbbra is idő szerint megy, csak a szélei közelítők.',
+    frameBlank:
+      '{count} képkockának nincs megjeleníthető pontja (a képük nem dekódolható). Az idővonalon maradnak, és a szakaszukkal együtt kivágódnak.',
+    cutRowFrames: '{from}–{to}% · {frames} képkocka',
+    keepInfoFrames: '{remaining} / {total} képkocka maradt',
 
     errWholeScan:
       'Szűkítsd a csúszkát a kivágandó szakaszra — most az egész szken ki lenne vágva.',
