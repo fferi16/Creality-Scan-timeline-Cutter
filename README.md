@@ -13,12 +13,19 @@ moment the subject moved, and **cut that section** — then you re-fuse the clea
 project in Creality Scan.
 
 ### How it works
-- The raw scan points are read straight from the project's plain-text
-  `pc_after.ply`, which the scanner writes in **capture (time) order** — so a
-  point's position in the file is its position in scan time. This is what makes
-  a real timeline possible, and it needs no SDK.
+- The scan is rebuilt from its own **depth frames**. Each frame is a single
+  instant and carries its own pose, so the frames can be placed back into one
+  coordinate system — the result is a cloud whose points are grouped by frame,
+  in scan order. Measured against the project's registered cloud, the placed
+  frames land 0.19 mm (small scan) to 0.79 mm (full body) from it.
 - A bottom slider (Bambu-Lab layer-preview style) controls which slice of scan
-  time is visible; you narrow it to the moved section and cut it.
+  time is visible. It snaps to **whole frames**, and the cut deletes exactly the
+  frames it showed you — what disappears from the view is what disappears from
+  the scan. No percentage-to-frame guesswork anywhere in between.
+- If the frames cannot be read (no Creality Scan installed, or a version whose
+  internals moved), the timeline falls back to the project's `pc_after.ply`,
+  which the scanner writes in capture order. That is still a real timeline, only
+  its edges are approximate — and the UI says so instead of pretending.
 - The cut always works on a **copy** of the project — the original is never
   touched — and the copy is registered so it shows up in Creality Scan.
 
@@ -39,6 +46,8 @@ and no Creality file is redistributed with this tool.
 ### Project layout
 - `backend/` — FastAPI server (Python). Point-cloud read + surface-mesh preview
   via [PyMeshLab](https://pymeshlab.readthedocs.io/) + [trimesh](https://trimesh.org/).
+  `frame_reader.py` decodes the depth frames and their poses; `obscan_sdk.py`
+  drives the scan engine. Both run as subprocesses, never inside the server.
 - `frontend/` — React + Vite + [three.js](https://threejs.org/), with an
   English/Hungarian language switch.
 - `launcher.py` — the desktop app: opens the tool in its own native window
@@ -83,13 +92,21 @@ lépegetsz végig, kijelölöd a bemozdulás pillanatát, és **kivágod azt a
 szakaszt** — utána a megtisztított projektet a Creality Scanben fuzionálod újra.
 
 ### Hogyan működik
-- A nyers pontok közvetlenül a projekt sima szöveges `pc_after.ply` fájljából
-  jönnek, amit a szkenner **keletkezési (idő) sorrendben** ír — így egy pont
-  helye a fájlban a szkennelési időben elfoglalt helye. Ez teszi lehetővé a
-  valódi idővonalat, és ehhez nem kell SDK.
+- A szken a saját **mélység-képkockáiból** épül újra. Egy képkocka egyetlen
+  pillanat, és megvan a saját pózja, így a képkockák visszahelyezhetők egy közös
+  koordinátarendszerbe — az eredmény egy olyan pontfelhő, amiben a pontok
+  képkockánként, szkennelési sorrendben állnak. A projekt regisztrált felhőjéhez
+  mérve a visszahelyezett képkockák 0,19 mm (kis szken) és 0,79 mm (teljes
+  alakos) távolságra esnek tőle.
 - Egy alsó csúszka (Bambu Lab réteg-nézegető stílus) szabályozza, hogy a
-  szkennelési idő melyik szelete látszik; erre szűkíted a bemozdult szakaszt, és
-  kivágod.
+  szkennelési idő melyik szelete látszik. **Egész képkockákra** ugrik, és a
+  vágás pontosan azokat a képkockákat törli, amiket mutatott — ami eltűnik a
+  nézetből, az tűnik el a szkenből. Sehol nincs százalék→képkocka becslés.
+- Ha a képkockák nem olvashatók (nincs telepítve a Creality Scan, vagy olyan
+  verzió van, amiben elmozdultak a belső címek), az idővonal a projekt
+  `pc_after.ply` fájljára vált, amit a szkenner keletkezési sorrendben ír. Az is
+  valódi idővonal, csak a szélei közelítők — és a felület ezt meg is mondja
+  ahelyett, hogy úgy tenne, mintha pontos lenne.
 - A vágás mindig a projekt egy **másolatán** dolgozik — az eredetihez sosem nyúl
   —, és a másolatot bejegyzi, hogy megjelenjen a Creality Scanben.
 
@@ -110,6 +127,9 @@ semmilyen Creality-fájlt nem terjeszt együtt az eszközzel.
 ### Felépítés
 - `backend/` — FastAPI szerver (Python). Pontfelhő-olvasás + felület-előnézet
   [PyMeshLab](https://pymeshlab.readthedocs.io/) + [trimesh](https://trimesh.org/).
+  A `frame_reader.py` a mélység-képkockákat és a pózokat dekódolja, az
+  `obscan_sdk.py` a szken-motort vezérli. Mindkettő külön alfolyamatban fut,
+  sosem a szerveren belül.
 - `frontend/` — React + Vite + [three.js](https://threejs.org/), magyar/angol
   nyelvváltóval.
 - `launcher.py` — az asztali alkalmazás: saját natív ablakban nyitja meg az

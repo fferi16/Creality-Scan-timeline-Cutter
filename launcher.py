@@ -168,6 +168,16 @@ def main():
         server.terminate()
         sys.exit(0 if ok else 1)
 
+    # The viewer draws millions of points through WebGL, and on a laptop
+    # Chromium (so WebView2 too) defaults to the integrated GPU — measured here:
+    # the point cloud was rendering on "Intel(R) UHD Graphics" while a GeForce
+    # sat idle. This asks Windows for the high-performance adapter instead. It
+    # is ignored on machines that only have one GPU, and costs battery on those
+    # that have two.
+    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
+        os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+        + " --force_high_performance_gpu").strip()
+
     import webview  # deferred: heavy import, not needed for the error paths
 
     window = webview.create_window(
